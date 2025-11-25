@@ -182,6 +182,9 @@ def run_scan(context, chat_id, max_ips=None):
     last_update_time = time.time()
     
     try:
+        # Send diagnostic message
+        send_message_sync(context, chat_id, "🔍 Loading files...")
+        
         # Load IPs
         with open(IP_FILE) as f:
             ips = [line.strip() for line in f if line.strip() and not line.startswith('#')]
@@ -198,6 +201,17 @@ def run_scan(context, chat_id, max_ips=None):
             pass_count = len([line for line in f if line.strip() and not line.startswith('#')])
         
         scan_status['total_ips'] = len(ips)
+        
+        # Send diagnostic message
+        send_message_sync(context, chat_id, f"✅ Loaded {len(ips)} IPs and {pass_count} passwords")
+        
+        # Check Hydra
+        if not check_hydra_installed():
+            send_message_sync(context, chat_id, "❌ Hydra not installed!")
+            scan_status['running'] = False
+            return
+        
+        send_message_sync(context, chat_id, "✅ Hydra installed and ready")
         
         # Send start message
         start_msg = (
@@ -241,6 +255,11 @@ def run_scan(context, chat_id, max_ips=None):
             f.write(f"Scan started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write("="*70 + "\n\n")
         
+        # Send diagnostic for first IP
+        if ips:
+            first_ip = ips[0]
+            send_message_sync(context, chat_id, f"🔍 Testing first IP: {first_ip}\n⏱ This may take 10-60 seconds...")
+        
         # Check each IP
         for idx, ip_string in enumerate(ips, 1):
             if not scan_status['running']:
@@ -256,6 +275,10 @@ def run_scan(context, chat_id, max_ips=None):
                 port = 5900
             
             scan_status['current_ip'] = f"{ip}:{port}"
+            
+            # Send status for first few IPs
+            if idx <= 3:
+                send_message_sync(context, chat_id, f"🔍 Checking IP {idx}/{len(ips)}: {ip}:{port}")
             
             # Update progress every 3 seconds
             current_time = time.time()
@@ -285,7 +308,16 @@ def run_scan(context, chat_id, max_ips=None):
                 last_update_time = current_time
             
             # Check VNC (reduced timeout for faster scanning)
+            check_start = time.time()
             success, result = check_vnc_with_hydra(ip, port, PASS_FILE, 4, timeout_sec=60)
+            check_duration = time.time() - check_start
+            
+            # Send diagnostic for first few IPs
+            if idx <= 3:
+                if success:
+                    send_message_sync(context, chat_id, f"✅ IP {idx} done in {check_duration:.1f}s - HIT FOUND! 🎯")
+                else:
+                    send_message_sync(context, chat_id, f"✅ IP {idx} done in {check_duration:.1f}s - No match")
             
             if success:
                 scan_status['found'] += 1
@@ -360,6 +392,9 @@ def run_scan(context, chat_id, max_ips=None):
     except Exception as e:
         error_msg = f"❌ <b>Scan Error!</b>\n\n{str(e)}"
         send_message_sync(context, chat_id, error_msg)
+        print(f"[ERROR] Scan failed: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         scan_status['running'] = False
 
