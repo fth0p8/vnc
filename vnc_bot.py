@@ -188,7 +188,6 @@ class VNCScanner:
             if not self.running:
                 with self.lock:
                     self.active_threads -= 1
-                self.queue.task_done()
                 break
                 
             success, server_name = self.check_vnc_null(ip, port)
@@ -207,8 +206,6 @@ class VNCScanner:
             with self.lock:
                 self.checked_servers += 1
                 self.active_threads -= 1
-                
-            self.queue.task_done()
     
     def brute_worker(self):
         while self.running:
@@ -228,14 +225,12 @@ class VNCScanner:
             if not self.running:
                 with self.lock:
                     self.active_threads -= 1
-                self.brute_queue.task_done()
                 break
             
             with self.lock:
                 if ip_port_key in self.cracked_ips:
                     self.checked_servers += 1
                     self.active_threads -= 1
-                    self.brute_queue.task_done()
                     continue
             
             for pwd in self.passwords:
@@ -256,8 +251,6 @@ class VNCScanner:
             with self.lock:
                 self.checked_servers += 1
                 self.active_threads -= 1
-                
-            self.brute_queue.task_done()
     
     def stop(self):
         self.running = False
@@ -345,9 +338,14 @@ class VNCScanner:
             for ip_info in ips:
                 self.queue.put(ip_info)
             
-            print(f"[P1] Waiting...")
-            self.queue.join()
+            print(f"[P1] Waiting for completion...")
+            # Wait for queue to be empty AND all threads to finish working
+            while not self.queue.empty() or self.active_threads > 0:
+                await asyncio.sleep(0.5)
+                if not self.running:
+                    break
             
+            print(f"[P1] Stopping threads...")
             for _ in range(self.scan_threads):
                 self.queue.put(None)
             
@@ -372,9 +370,14 @@ class VNCScanner:
                 for ip_info in self.null_servers:
                     self.brute_queue.put(ip_info)
                 
-                print(f"[P2] Waiting...")
-                self.brute_queue.join()
+                print(f"[P2] Waiting for completion...")
+                # Wait for queue to be empty AND all threads to finish working
+                while not self.brute_queue.empty() or self.active_threads > 0:
+                    await asyncio.sleep(0.5)
+                    if not self.running:
+                        break
                 
+                print(f"[P2] Stopping threads...")
                 for _ in range(self.scan_threads):
                     self.brute_queue.put(None)
                 
