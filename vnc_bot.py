@@ -20,6 +20,12 @@ active_scans = {}
 
 VNC_PORTS = [5900, 5901, 5902, 5903, 5904, 5905]
 
+def format_time(seconds):
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}"
+
 class VNCScanner:
     def __init__(self, chat_id, bot, scan_threads=200, scan_timeout=2, brute_timeout=2):
         self.chat_id = chat_id
@@ -196,8 +202,8 @@ class VNCScanner:
                 f"<b>Progress:</b> {current}/{total} ({percent:.1f}%)\n\n"
                 f"<b>Hits Found:</b> {hits}\n\n"
                 f"<b>Speed:</b> {speed:.1f} servers/sec\n\n"
-                f"<b>Elapsed:</b> {int(elapsed)}s\n\n"
-                f"<b>Remaining:</b> {int(remaining)}s\n\n"
+                f"<b>Elapsed:</b> {format_time(elapsed)}\n\n"
+                f"<b>Remaining:</b> {format_time(remaining)}\n\n"
                 f"<b>Threads:</b> {self.scan_threads}\n\n"
                 f"<b>Timeout:</b> {self.scan_timeout}s\n\n"
                 f"{trying_text}"
@@ -274,7 +280,7 @@ class VNCScanner:
             f"<b>SCAN COMPLETED</b>\n\n"
             f"<b>Total Checked:</b> {self.checked_servers}\n"
             f"<b>Hits Found:</b> {len(self.results)}\n"
-            f"<b>Time Elapsed:</b> {int(elapsed)}s\n"
+            f"<b>Time Elapsed:</b> {format_time(elapsed)}\n"
             f"<b>Speed:</b> {self.checked_servers/elapsed:.1f} servers/sec\n\n"
             f"Results saved to file"
         )
