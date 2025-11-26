@@ -35,6 +35,8 @@ class VNCScanner:
         self.running = True
         self.start_time = None
         self.message_id = None
+        self.current_password = ""
+        self.current_password_index = 0
         
     def load_ips(self, content):
         ips = []
@@ -143,9 +145,12 @@ class VNCScanner:
                     self.checked_servers += 1
                 asyncio.run(self.send_hit(result))
             else:
-                for pwd in self.passwords[1:]:
+                for idx, pwd in enumerate(self.passwords[1:], 1):
                     if not self.running:
                         break
+                    with self.lock:
+                        self.current_password = pwd
+                        self.current_password_index = idx
                     success, password, server_name = self.check_vnc_auth(ip, port, pwd)
                     if success:
                         result = f"{ip}:{port}-{password}-[{server_name}]"
@@ -172,10 +177,18 @@ class VNCScanner:
                 current = self.checked_servers
                 total = self.total_servers
                 hits = len(self.results)
+                current_pwd = self.current_password
+                pwd_idx = self.current_password_index
             elapsed = time.time() - self.start_time
             percent = (current / total) * 100 if total > 0 else 0
             speed = current / elapsed if elapsed > 0 else 0
             remaining = (total - current) / speed if speed > 0 else 0
+            
+            if current_pwd:
+                trying_text = f'Trying "{current_pwd}" on {total} servers'
+            else:
+                trying_text = f'Trying "null" on {total} servers'
+            
             text = (
                 f"<b>VNC SCANNER STATUS</b>\n\n"
                 f"<b>Progress:</b> {current}/{total} ({percent:.1f}%)\n"
@@ -184,7 +197,8 @@ class VNCScanner:
                 f"<b>Elapsed:</b> {int(elapsed)}s\n"
                 f"<b>Remaining:</b> {int(remaining)}s\n"
                 f"<b>Threads:</b> {self.scan_threads}\n"
-                f"<b>Timeout:</b> {self.scan_timeout}s"
+                f"<b>Timeout:</b> {self.scan_timeout}s\n\n"
+                f"{trying_text}"
             )
             keyboard = [[InlineKeyboardButton("STOP SCAN", callback_data=f"stop_{self.chat_id}")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
