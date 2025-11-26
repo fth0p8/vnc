@@ -222,14 +222,14 @@ class VNCScanner:
                 trying_text = f'Trying "null" on {total} servers'
             
             text = (
-                f"<b>VNC SCANNER STATUS</b>\n\n"
-                f"<b>Progress:</b> {current}/{total} ({percent:.1f}%)\n\n"
-                f"<b>Hits Found:</b> {hits}\n\n"
-                f"<b>Speed:</b> {speed:.1f} servers/sec\n\n"
-                f"<b>Elapsed:</b> {format_time(elapsed)}\n\n"
-                f"<b>Remaining:</b> {format_time(remaining)}\n\n"
-                f"<b>Threads:</b> {self.scan_threads}\n\n"
-                f"<b>Timeout:</b> {self.scan_timeout}s\n\n"
+                f"<b>VNC SCANNER STATUS</b>\n"
+                f"<b>Progress:</b> {current}/{total} ({percent:.1f}%)\n"
+                f"<b>Hits Found:</b> {hits}\n"
+                f"<b>Speed:</b> {speed:.1f} servers/sec\n"
+                f"<b>Elapsed:</b> {format_time(elapsed)}\n"
+                f"<b>Remaining:</b> {format_time(remaining)}\n"
+                f"<b>Threads:</b> {self.scan_threads}\n"
+                f"<b>Timeout:</b> {self.scan_timeout}s\n"
                 f"{trying_text}"
             )
             keyboard = [[InlineKeyboardButton("STOP SCAN", callback_data=f"stop_{self.chat_id}")]]
