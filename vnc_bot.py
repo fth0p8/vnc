@@ -21,6 +21,8 @@ active_scans = {}
 VNC_PORTS = [5900, 5901, 5902, 5903, 5904, 5905]
 
 def format_time(seconds):
+    if seconds < 0:
+        seconds = 0
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
@@ -148,16 +150,20 @@ class VNCScanner:
                 continue
             if item is None:
                 break
+            
             ip, port = item
+            found = False
+            
             if not self.running:
                 self.queue.task_done()
                 break
+                
             success, password, server_name = self.check_vnc_auth(ip, port, "")
             if success:
                 result = f"{ip}:{port}-{password}-[{server_name}]"
                 with self.lock:
                     self.results.append(result)
-                    self.checked_servers += 1
+                    found = True
                 if self.loop:
                     asyncio.run_coroutine_threadsafe(self.send_hit(result), self.loop)
             else:
@@ -171,12 +177,14 @@ class VNCScanner:
                         result = f"{ip}:{port}-{password}-[{server_name}]"
                         with self.lock:
                             self.results.append(result)
-                            self.checked_servers += 1
+                            found = True
                         if self.loop:
                             asyncio.run_coroutine_threadsafe(self.send_hit(result), self.loop)
                         break
-                with self.lock:
-                    self.checked_servers += 1
+            
+            with self.lock:
+                self.checked_servers += 1
+                
             self.queue.task_done()
     
     def stop(self):
@@ -222,14 +230,14 @@ class VNCScanner:
                 trying_text = f'Trying "null" on {total} servers'
             
             text = (
-                f"<b>VNC SCANNER STATUS</b>\n"
-                f"<b>Progress:</b> {current}/{total} ({percent:.1f}%)\n"
-                f"<b>Hits Found:</b> {hits}\n"
-                f"<b>Speed:</b> {speed:.1f} servers/sec\n"
-                f"<b>Elapsed:</b> {format_time(elapsed)}\n"
-                f"<b>Remaining:</b> {format_time(remaining)}\n"
-                f"<b>Threads:</b> {self.scan_threads}\n"
-                f"<b>Timeout:</b> {self.scan_timeout}s\n"
+                f"<b>VNC SCANNER STATUS</b>\n\n"
+                f"<b>Progress:</b> {current}/{total} ({percent:.1f}%)\n\n"
+                f"<b>Hits Found:</b> {hits}\n\n"
+                f"<b>Speed:</b> {speed:.1f} servers/sec\n\n"
+                f"<b>Elapsed:</b> {format_time(elapsed)}\n\n"
+                f"<b>Remaining:</b> {format_time(remaining)}\n\n"
+                f"<b>Threads:</b> {self.scan_threads}\n\n"
+                f"<b>Timeout:</b> {self.scan_timeout}s\n\n"
                 f"{trying_text}"
             )
             keyboard = [[InlineKeyboardButton("STOP SCAN", callback_data=f"stop_{self.chat_id}")]]
@@ -244,7 +252,7 @@ class VNCScanner:
                         reply_markup=reply_markup
                     )
             except Exception as e:
-                print(f"Error updating progress: {e}")
+                pass
                 
     async def run(self, ips_content, passwords_content):
         self.loop = asyncio.get_event_loop()
