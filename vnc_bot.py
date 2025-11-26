@@ -319,8 +319,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     user_id = query.from_user.id
+    
+    try:
+        await query.answer()
+    except:
+        pass
     
     if not is_authorized(user_id):
         await query.edit_message_text("You are not authorized.")
@@ -330,16 +334,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in active_scans:
             await query.edit_message_text("You already have an active scan. Stop it first.")
             return
-        user_states[user_id] = {"step": "waiting_ips"}
+        if user_id not in user_states:
+            user_states[user_id] = {}
+        user_states[user_id]["step"] = "waiting_ips"
         await query.edit_message_text("Send me the IP list file")
         
     elif query.data == "settings":
-        current_settings = user_states.get(user_id, {}).get("settings", {
-            "threads": 200,
-            "scan_timeout": 2,
-            "brute_timeout": 2,
-            "port": 5900
-        })
+        if user_id not in user_states:
+            user_states[user_id] = {}
+        if "settings" not in user_states[user_id]:
+            user_states[user_id]["settings"] = {
+                "threads": 200,
+                "scan_timeout": 2,
+                "brute_timeout": 2,
+                "port": 5900
+            }
+        current_settings = user_states[user_id]["settings"]
         keyboard = [
             [InlineKeyboardButton(f"Threads: {current_settings['threads']}", callback_data="set_threads")],
             [InlineKeyboardButton(f"Scan Timeout: {current_settings['scan_timeout']}s", callback_data="set_scan_timeout")],
@@ -356,7 +366,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     elif query.data.startswith("set_"):
         setting = query.data.replace("set_", "")
-        user_states[user_id] = {"step": f"setting_{setting}"}
+        if user_id not in user_states:
+            user_states[user_id] = {}
+        user_states[user_id]["step"] = f"setting_{setting}"
         await query.edit_message_text(f"Send new value for {setting.replace('_', ' ')}")
         
     elif query.data == "sudo_menu":
@@ -376,13 +388,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "add_sudo":
         if user_id != OWNER_ID:
             return
-        user_states[user_id] = {"step": "add_sudo"}
+        if user_id not in user_states:
+            user_states[user_id] = {}
+        user_states[user_id]["step"] = "add_sudo"
         await query.edit_message_text("Send user ID to add as sudo")
         
     elif query.data == "remove_sudo":
         if user_id != OWNER_ID:
             return
-        user_states[user_id] = {"step": "remove_sudo"}
+        if user_id not in user_states:
+            user_states[user_id] = {}
+        user_states[user_id]["step"] = "remove_sudo"
         await query.edit_message_text("Send user ID to remove from sudo")
         
     elif query.data == "back_main":
@@ -403,9 +419,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = int(query.data.split("_")[1])
         if chat_id in active_scans:
             active_scans[chat_id].running = False
-            await query.answer("Stopping scan...")
-        else:
-            await query.answer("No active scan found")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -433,12 +446,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             content = await file.download_as_bytearray()
             state["passwords_content"] = content.decode('utf-8')
             
-            settings = state.get("settings", {
-                "threads": 200,
-                "scan_timeout": 2,
-                "brute_timeout": 2,
-                "port": 5900
-            })
+            if "settings" not in state:
+                state["settings"] = {
+                    "threads": 200,
+                    "scan_timeout": 2,
+                    "brute_timeout": 2,
+                    "port": 5900
+                }
+            settings = state["settings"]
             
             scanner = VNCScanner(
                 chat_id=user_id,
@@ -468,10 +483,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 }
             state["settings"][setting] = value
             user_states[user_id] = state
-            await update.message.reply_text(f"{setting.replace('_', ' ')} set to {value}")
+            
+            keyboard = [[InlineKeyboardButton("BACK TO SETTINGS", callback_data="settings")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                f"{setting.replace('_', ' ')} set to {value}",
+                reply_markup=reply_markup
+            )
         except:
             await update.message.reply_text("Invalid value. Send a number")
-        del user_states[user_id]
         
     elif state.get("step") == "add_sudo":
         try:
@@ -480,7 +500,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"User {sudo_id} added as sudo")
         except:
             await update.message.reply_text("Invalid user ID")
-        del user_states[user_id]
+        if user_id in user_states:
+            del user_states[user_id]
         
     elif state.get("step") == "remove_sudo":
         try:
@@ -492,7 +513,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("User not in sudo list")
         except:
             await update.message.reply_text("Invalid user ID")
-        del user_states[user_id]
+        if user_id in user_states:
+            del user_states[user_id]
 
 def main():
     if not BOT_TOKEN or OWNER_ID == 0:
