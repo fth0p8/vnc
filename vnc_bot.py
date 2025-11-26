@@ -148,9 +148,6 @@ class VNCScanner:
             return False, None, None
             
     def worker(self):
-        with self.lock:
-            self.active_threads += 1
-            
         while self.running:
             try:
                 item = self.queue.get(timeout=1)
@@ -159,9 +156,14 @@ class VNCScanner:
             if item is None:
                 break
             
+            with self.lock:
+                self.active_threads += 1
+            
             ip, port = item
             
             if not self.running:
+                with self.lock:
+                    self.active_threads -= 1
                 self.queue.task_done()
                 break
                 
@@ -189,11 +191,9 @@ class VNCScanner:
             
             with self.lock:
                 self.checked_servers += 1
+                self.active_threads -= 1
                 
             self.queue.task_done()
-            
-        with self.lock:
-            self.active_threads -= 1
     
     def stop(self):
         self.running = False
@@ -239,14 +239,13 @@ class VNCScanner:
                 trying_text = f'Trying "null" on {total} servers'
             
             text = (
-                f"<b>VNC SCANNER STATUS</b>\n\n"
-                f"<b>Progress:</b> {current}/{total} ({percent:.1f}%)\n\n"
-                f"<b>Hits Found:</b> {hits}\n\n"
-                f"<b>Speed:</b> {speed:.2f} servers/sec\n\n"
-                f"<b>Elapsed:</b> {format_time(elapsed)}\n\n"
-                f"<b>Remaining:</b> {format_time(remaining)}\n\n"
-                f"<b>Threads:</b> {self.scan_threads} (Active: {active})\n\n"
-                f"<b>Timeout:</b> {self.scan_timeout}s\n\n"
+                f"<b>VNC SCANNER STATUS</b>\n"
+                f"<b>Progress:</b> {current}/{total} ({percent:.1f}%)\n"
+                f"<b>Hits Found:</b> {hits}\n"
+                f"<b>Elapsed:</b> {format_time(elapsed)}\n"
+                f"<b>Remaining:</b> {format_time(remaining)}\n"
+                f"<b>Active Threads:</b> {active}/{self.scan_threads}\n"
+                f"<b>Timeout:</b> {self.scan_timeout}s\n"
                 f"{trying_text}"
             )
             keyboard = [[InlineKeyboardButton("STOP SCAN", callback_data=f"stop_{self.chat_id}")]]
@@ -333,8 +332,7 @@ class VNCScanner:
                 f"<b>SCAN STOPPED</b>\n\n"
                 f"<b>Total Checked:</b> {self.checked_servers}/{self.total_servers}\n"
                 f"<b>Hits Found:</b> {len(self.results)}\n"
-                f"<b>Time Elapsed:</b> {format_time(elapsed)}\n"
-                f"<b>Speed:</b> {self.checked_servers/elapsed:.2f} servers/sec\n\n"
+                f"<b>Time Elapsed:</b> {format_time(elapsed)}\n\n"
                 f"Scan was stopped by user"
             )
         else:
@@ -342,8 +340,7 @@ class VNCScanner:
                 f"<b>SCAN COMPLETED</b>\n\n"
                 f"<b>Total Checked:</b> {self.checked_servers}\n"
                 f"<b>Hits Found:</b> {len(self.results)}\n"
-                f"<b>Time Elapsed:</b> {format_time(elapsed)}\n"
-                f"<b>Speed:</b> {self.checked_servers/elapsed:.2f} servers/sec\n\n"
+                f"<b>Time Elapsed:</b> {format_time(elapsed)}\n\n"
                 f"Results saved to file"
             )
         
