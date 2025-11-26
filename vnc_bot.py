@@ -44,6 +44,7 @@ class VNCScanner:
         self.message_id = None
         self.current_password = ""
         self.loop = None
+        self.stopped = False
         
     def load_ips(self, content):
         ips = []
@@ -141,10 +142,16 @@ class VNCScanner:
             
     def worker(self):
         while self.running:
-            item = self.queue.get()
+            try:
+                item = self.queue.get(timeout=1)
+            except:
+                continue
             if item is None:
                 break
             ip, port = item
+            if not self.running:
+                self.queue.task_done()
+                break
             success, password, server_name = self.check_vnc_auth(ip, port, "")
             if success:
                 result = f"{ip}:{port}-{password}-[{server_name}]"
@@ -171,6 +178,21 @@ class VNCScanner:
                 with self.lock:
                     self.checked_servers += 1
             self.queue.task_done()
+    
+    def stop(self):
+        self.running = False
+        self.stopped = True
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+                self.queue.task_done()
+            except:
+                break
+        for _ in range(self.scan_threads):
+            try:
+                self.queue.put(None)
+            except:
+                pass
             
     async def send_hit(self, result):
         text = f"<b>HIT FOUND</b>\n\n<code>{result}</code>"
@@ -182,6 +204,8 @@ class VNCScanner:
     async def update_progress(self):
         while self.running and self.checked_servers < self.total_servers:
             await asyncio.sleep(3)
+            if not self.running:
+                break
             with self.lock:
                 current = self.checked_servers
                 total = self.total_servers
@@ -198,14 +222,14 @@ class VNCScanner:
                 trying_text = f'Trying "null" on {total} servers'
             
             text = (
-                f"<b>VNC SCANNER STATUS</b>\n"
-                f"<b>Progress:</b> {current}/{total} ({percent:.1f}%)\n"
-                f"<b>Hits Found:</b> {hits}\n"
-                f"<b>Speed:</b> {speed:.1f} servers/sec\n"
-                f"<b>Elapsed:</b> {format_time(elapsed)}\n"
-                f"<b>Remaining:</b> {format_time(remaining)}\n"
-                f"<b>Threads:</b> {self.scan_threads}\n"
-                f"<b>Timeout:</b> {self.scan_timeout}s\n"
+                f"<b>VNC SCANNER STATUS</b>\n\n"
+                f"<b>Progress:</b> {current}/{total} ({percent:.1f}%)\n\n"
+                f"<b>Hits Found:</b> {hits}\n\n"
+                f"<b>Speed:</b> {speed:.1f} servers/sec\n\n"
+                f"<b>Elapsed:</b> {format_time(elapsed)}\n\n"
+                f"<b>Remaining:</b> {format_time(remaining)}\n\n"
+                f"<b>Threads:</b> {self.scan_threads}\n\n"
+                f"<b>Timeout:</b> {self.scan_timeout}s\n\n"
                 f"{trying_text}"
             )
             keyboard = [[InlineKeyboardButton("STOP SCAN", callback_data=f"stop_{self.chat_id}")]]
@@ -256,34 +280,52 @@ class VNCScanner:
             threads.append(t)
             
         for ip_info in ips:
+            if not self.running:
+                break
             self.queue.put(ip_info)
             
         update_task = asyncio.create_task(self.update_progress())
         
-        while not self.queue.empty() or any(t.is_alive() for t in threads):
+        while self.running and (not self.queue.empty() or any(t.is_alive() for t in threads)):
             await asyncio.sleep(0.5)
-            if not self.running:
-                break
         
-        self.queue.join()
         self.running = False
         
         for _ in range(self.scan_threads):
-            self.queue.put(None)
+            try:
+                self.queue.put(None)
+            except:
+                pass
+        
         for t in threads:
-            t.join(timeout=2)
+            t.join(timeout=1)
             
-        await update_task
+        try:
+            await asyncio.wait_for(update_task, timeout=2)
+        except:
+            pass
         
         elapsed = time.time() - self.start_time
-        text = (
-            f"<b>SCAN COMPLETED</b>\n\n"
-            f"<b>Total Checked:</b> {self.checked_servers}\n"
-            f"<b>Hits Found:</b> {len(self.results)}\n"
-            f"<b>Time Elapsed:</b> {format_time(elapsed)}\n"
-            f"<b>Speed:</b> {self.checked_servers/elapsed:.1f} servers/sec\n\n"
-            f"Results saved to file"
-        )
+        
+        if self.stopped:
+            text = (
+                f"<b>SCAN STOPPED</b>\n\n"
+                f"<b>Total Checked:</b> {self.checked_servers}/{self.total_servers}\n"
+                f"<b>Hits Found:</b> {len(self.results)}\n"
+                f"<b>Time Elapsed:</b> {format_time(elapsed)}\n"
+                f"<b>Speed:</b> {self.checked_servers/elapsed:.1f} servers/sec\n\n"
+                f"Scan was stopped by user"
+            )
+        else:
+            text = (
+                f"<b>SCAN COMPLETED</b>\n\n"
+                f"<b>Total Checked:</b> {self.checked_servers}\n"
+                f"<b>Hits Found:</b> {len(self.results)}\n"
+                f"<b>Time Elapsed:</b> {format_time(elapsed)}\n"
+                f"<b>Speed:</b> {self.checked_servers/elapsed:.1f} servers/sec\n\n"
+                f"Results saved to file"
+            )
+        
         try:
             await self.bot.edit_message_text(
                 chat_id=self.chat_id,
@@ -433,7 +475,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("stop_"):
         chat_id = int(query.data.split("_")[1])
         if chat_id in active_scans:
-            active_scans[chat_id].running = False
+            active_scans[chat_id].stop()
+            try:
+                await query.answer("Stopping scan...")
+            except:
+                pass
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
