@@ -471,6 +471,34 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_states[user_id] = {}
         user_states[user_id]["step"] = f"setting_{setting}"
         await query.edit_message_text(f"Send value for {setting.replace('_', ' ')}")
+    
+    elif query.data == "sudo_menu":
+        if user_id != OWNER_ID:
+            await query.answer("Only owner can access")
+            return
+        sudo_list = "\n".join([f"- {uid}" for uid in sudo_users]) if sudo_users else "No sudo users"
+        keyboard = [
+            [InlineKeyboardButton("ADD SUDO", callback_data="add_sudo")],
+            [InlineKeyboardButton("REMOVE SUDO", callback_data="remove_sudo")],
+            [InlineKeyboardButton("BACK", callback_data="back_main")]
+        ]
+        await query.edit_message_text(f"<b>SUDO USERS</b>\n\n{sudo_list}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+    
+    elif query.data == "add_sudo":
+        if user_id != OWNER_ID:
+            return
+        if user_id not in user_states:
+            user_states[user_id] = {}
+        user_states[user_id]["step"] = "add_sudo"
+        await query.edit_message_text("Send user ID to add as sudo")
+    
+    elif query.data == "remove_sudo":
+        if user_id != OWNER_ID:
+            return
+        if user_id not in user_states:
+            user_states[user_id] = {}
+        user_states[user_id]["step"] = "remove_sudo"
+        await query.edit_message_text("Send user ID to remove from sudo")
         
     elif query.data == "back_main":
         keyboard = [[InlineKeyboardButton("START SCAN", callback_data="new_scan")], [InlineKeyboardButton("SETTINGS", callback_data="settings")]]
@@ -524,6 +552,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"{setting} set to {value}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("BACK", callback_data="settings")]]))
         except:
             await update.message.reply_text("Invalid number")
+    
+    elif state.get("step") == "add_sudo":
+        try:
+            sudo_id = int(update.message.text)
+            sudo_users.add(sudo_id)
+            await update.message.reply_text(f"User {sudo_id} added as sudo", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("BACK", callback_data="sudo_menu")]]))
+        except:
+            await update.message.reply_text("Invalid user ID")
+        if user_id in user_states:
+            del user_states[user_id]
+    
+    elif state.get("step") == "remove_sudo":
+        try:
+            sudo_id = int(update.message.text)
+            if sudo_id in sudo_users:
+                sudo_users.remove(sudo_id)
+                await update.message.reply_text(f"User {sudo_id} removed from sudo", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("BACK", callback_data="sudo_menu")]]))
+            else:
+                await update.message.reply_text("User not in sudo list")
+        except:
+            await update.message.reply_text("Invalid user ID")
+        if user_id in user_states:
+            del user_states[user_id]
 
 def main():
     if not BOT_TOKEN or OWNER_ID == 0:
