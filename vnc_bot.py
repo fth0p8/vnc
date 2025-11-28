@@ -149,26 +149,124 @@ class VNCScanner:
             if version is None:
                 sock.close()
                 return False, None
+            
+            # Type 2: Standard VNC Authentication
             if sec_types and 2 in sec_types:
-                sock.sendall(b'\x02')
-                challenge = sock.recv(16)
-                if len(challenge) != 16:
-                    sock.close()
-                    return False, None
-                key = (password + '\x00' * 8)[:8].encode('latin-1')
-                response = d3des.desencrypt(key, challenge)
-                sock.sendall(response)
-                result = sock.recv(4)
-                if len(result) == 4:
-                    auth_result = struct.unpack('!I', result)[0]
-                    if auth_result == 0:
-                        sock.sendall(b'\x01')
-                        server_name = self.get_server_name(sock)
+                try:
+                    sock.sendall(b'\x02')
+                    challenge = sock.recv(16)
+                    if len(challenge) != 16:
                         sock.close()
-                        return True, server_name
+                        return False, None
+                    key = (password + '\x00' * 8)[:8].encode('latin-1')
+                    response = d3des.desencrypt(key, challenge)
+                    sock.sendall(response)
+                    result = sock.recv(4)
+                    if len(result) == 4:
+                        auth_result = struct.unpack('!I', result)[0]
+                        if auth_result == 0:
+                            sock.sendall(b'\x01')
+                            server_name = self.get_server_name(sock)
+                            sock.close()
+                            return True, server_name
+                except Exception as e:
+                    print(f"[VNC AUTH ERROR] {ip}:{port} Type 2 - {e}")
+                    pass
+            
+            # Type 16: Tight VNC Authentication
+            if sec_types and 16 in sec_types:
+                try:
+                    sock.sendall(b'\x10')
+                    
+                    # Read number of tunnel types
+                    tunnel_count = sock.recv(4)
+                    if len(tunnel_count) == 4:
+                        num_tunnels = struct.unpack('!I', tunnel_count)[0]
+                        if num_tunnels > 0:
+                            tunnels = sock.recv(16 * num_tunnels)
+                    
+                    # Send no tunneling
+                    sock.sendall(struct.pack('!I', 0))
+                    
+                    # Read number of auth types
+                    auth_count = sock.recv(4)
+                    if len(auth_count) == 4:
+                        num_auths = struct.unpack('!I', auth_count)[0]
+                        if num_auths > 0:
+                            auths = sock.recv(16 * num_auths)
+                            
+                            # Check if VNC auth (2) is available
+                            for i in range(num_auths):
+                                auth_type = struct.unpack('!I', auths[i*16:i*16+4])[0]
+                                if auth_type == 2:
+                                    # Send auth type 2
+                                    sock.sendall(struct.pack('!I', 2))
+                                    
+                                    # Standard VNC auth flow
+                                    challenge = sock.recv(16)
+                                    if len(challenge) == 16:
+                                        key = (password + '\x00' * 8)[:8].encode('latin-1')
+                                        response = d3des.desencrypt(key, challenge)
+                                        sock.sendall(response)
+                                        result = sock.recv(4)
+                                        if len(result) == 4:
+                                            auth_result = struct.unpack('!I', result)[0]
+                                            if auth_result == 0:
+                                                sock.sendall(b'\x01')
+                                                server_name = self.get_server_name(sock)
+                                                sock.close()
+                                                return True, server_name
+                                    break
+                except Exception as e:
+                    print(f"[VNC AUTH ERROR] {ip}:{port} Type 16 - {e}")
+                    pass
+            
+            # Type 5: RA2 (RealVNC)
+            if sec_types and 5 in sec_types:
+                try:
+                    sock.sendall(b'\x05')
+                    # RA2 uses RSA + AES encryption - very complex
+                    # For now, just try to get generator/modulus
+                    gen_len = sock.recv(2)
+                    if len(gen_len) == 2:
+                        g_len = struct.unpack('!H', gen_len)[0]
+                        generator = sock.recv(g_len)
+                        mod_len = sock.recv(2)
+                        if len(mod_len) == 2:
+                            m_len = struct.unpack('!H', mod_len)[0]
+                            modulus = sock.recv(m_len)
+                            # RA2 requires full RSA/AES implementation
+                            # Skip for now - too complex
+                except Exception as e:
+                    print(f"[VNC AUTH ERROR] {ip}:{port} Type 5 (RA2) - {e}")
+                    pass
+            
+            # Type 18: Tight + VeNCrypt
+            if sec_types and 18 in sec_types:
+                try:
+                    sock.sendall(b'\x12')
+                    # VeNCrypt negotiation
+                    version = sock.recv(2)
+                    if len(version) == 2:
+                        # Send version 0.2
+                        sock.sendall(b'\x00\x02')
+                        ack = sock.recv(1)
+                        if len(ack) == 1 and ack[0] == 0:
+                            # Get subtypes
+                            subtype_count = sock.recv(1)
+                            if len(subtype_count) == 1:
+                                num_subtypes = subtype_count[0]
+                                subtypes = sock.recv(num_subtypes * 4)
+                                # Try to use plain VNC auth if available
+                                # This is complex - skip for now
+                except Exception as e:
+                    print(f"[VNC AUTH ERROR] {ip}:{port} Type 18 (VeNCrypt) - {e}")
+                    pass
+            
             sock.close()
             return False, None
-        except:
+        except Exception as e:
+            print(f"[VNC ERROR] {ip}:{port} - {e}")
             return False, None
             
     def null_worker(self):
